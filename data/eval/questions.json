@@ -1,0 +1,716 @@
+{
+  "version": 1,
+  "created_at": "2026-09-19T17:04:38.128175+00:00",
+  "description": "Hand-curated retrieval/answer evaluation set for the LangChain/LangGraph docs RAG pipeline.",
+  "corpus": {
+    "source": "data/chunks/corpus.jsonl",
+    "collection": "doc_chunks",
+    "num_chunks": 1578
+  },
+  "metrics": [
+    "recall@k",
+    "mrr@k",
+    "hit@k"
+  ],
+  "num_questions": 49,
+  "questions": [
+    {
+      "id": "q01",
+      "question": "What are the three durability modes for LangGraph checkpointers and what is the trade-off of each?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/checkpointers",
+        "section_heading": "Durability modes",
+        "chunk_ids": [
+          "3f79c0a17ec618f61969e72aa3537a03:10:1"
+        ]
+      },
+      "reference_answer": "\"exit\" persists only when execution exits (best performance, no mid-execution recovery); \"async\" persists asynchronously during the next step (good performance, small risk on crash); \"sync\" persists before the next step starts (high durability, performance overhead)."
+    },
+    {
+      "id": "q02",
+      "question": "Which StateSnapshot field lists the nodes to execute next, and how do you know the graph is complete?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/checkpointers",
+        "section_heading": "StateSnapshot fields",
+        "chunk_ids": [
+          "3f79c0a17ec618f61969e72aa3537a03:7:1"
+        ]
+      },
+      "reference_answer": "The `next` field is a tuple of node names. An empty tuple `()` means the graph is complete."
+    },
+    {
+      "id": "q03",
+      "question": "Which StateSnapshot field points to the previous checkpoint, and what is its value for the first checkpoint?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/checkpointers",
+        "section_heading": "StateSnapshot fields",
+        "chunk_ids": [
+          "3f79c0a17ec618f61969e72aa3537a03:7:1"
+        ]
+      },
+      "reference_answer": "`parent_config` holds the config of the previous checkpoint and is `None` for the first checkpoint."
+    },
+    {
+      "id": "q04",
+      "question": "Why should you not wrap an interrupt() call in a bare try/except block?",
+      "category": "troubleshooting",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/interrupts",
+        "section_heading": "Do not wrap interrupt calls in try/except",
+        "chunk_ids": [
+          "e4ede2ac122e6546d02ea3c6186607ba:11:1"
+        ]
+      },
+      "reference_answer": "A bare `except` will catch the interrupt exception itself. Separate interrupt calls from error-prone code, or catch only specific exception types."
+    },
+    {
+      "id": "q05",
+      "question": "Why must interrupt calls within a node stay in a consistent order across executions?",
+      "category": "troubleshooting",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/interrupts",
+        "section_heading": "Do not reorder interrupt calls within a node",
+        "chunk_ids": [
+          "e4ede2ac122e6546d02ea3c6186607ba:12:1"
+        ]
+      },
+      "reference_answer": "On resume, interrupts are matched by index; conditionally skipping or reordering them causes an index mismatch. Use a conditional edge instead of non-deterministic loops."
+    },
+    {
+      "id": "q06",
+      "question": "How do you set a maximum total run time for a node using TimeoutPolicy?",
+      "category": "howto",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/fault-tolerance",
+        "section_heading": "Run timeout",
+        "chunk_ids": [
+          "a4503310d8d7db90fef7f6fb374790cf:8:1"
+        ]
+      },
+      "reference_answer": "Pass `TimeoutPolicy(run_timeout=120)` to the node's `timeout` argument."
+    },
+    {
+      "id": "q07",
+      "question": "Which TimeoutPolicy option limits how long a node may be idle?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/fault-tolerance",
+        "section_heading": "Idle timeout",
+        "chunk_ids": [
+          "a4503310d8d7db90fef7f6fb374790cf:9:1"
+        ]
+      },
+      "reference_answer": "`idle_timeout` limits idle time, e.g. `TimeoutPolicy(idle_timeout=30)`."
+    },
+    {
+      "id": "q08",
+      "question": "How do you make an idle timeout refresh using heartbeats?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/fault-tolerance",
+        "section_heading": "Heartbeat mode",
+        "chunk_ids": [
+          "a4503310d8d7db90fef7f6fb374790cf:11:1"
+        ]
+      },
+      "reference_answer": "Use `TimeoutPolicy(idle_timeout=30, refresh_on=\"heartbeat\")`, so heartbeats reset the idle timer."
+    },
+    {
+      "id": "q09",
+      "question": "How do you trim message history to a token budget before calling the model?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/add-memory",
+        "section_heading": "Trim messages",
+        "chunk_ids": [
+          "fe8a176ba1d6ff49b577ddf0a624222e:10:1"
+        ]
+      },
+      "reference_answer": "Use `trim_messages(state[\"messages\"], strategy=\"last\", token_counter=count_tokens_approximately, max_tokens=..., start_on=\"human\", end_on=(\"human\",\"tool\"))`."
+    },
+    {
+      "id": "q10",
+      "question": "How does the summarization pattern keep message history from growing unbounded?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/add-memory",
+        "section_heading": "Summarize messages",
+        "chunk_ids": [
+          "fe8a176ba1d6ff49b577ddf0a624222e:12:1",
+          "fe8a176ba1d6ff49b577ddf0a624222e:12:2",
+          "fe8a176ba1d6ff49b577ddf0a624222e:12:3",
+          "fe8a176ba1d6ff49b577ddf0a624222e:12:4"
+        ]
+      },
+      "reference_answer": "Keep a running summary in state and delete older messages (e.g. with RemoveMessage), or use langmem's SummarizationNode to summarize old messages automatically."
+    },
+    {
+      "id": "q11",
+      "question": "How do you delete messages from state, and how do you remove all messages at once?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/add-memory",
+        "section_heading": "Delete messages",
+        "chunk_ids": [
+          "fe8a176ba1d6ff49b577ddf0a624222e:11:1"
+        ]
+      },
+      "reference_answer": "Return a list of `RemoveMessage(id=m.id)` (or `RemoveMessage(id=REMOVE_ALL_MESSAGES)` to clear all)."
+    },
+    {
+      "id": "q12",
+      "question": "How do you enable semantic search on an InMemoryStore?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/add-memory",
+        "section_heading": "Use semantic search",
+        "chunk_ids": [
+          "fe8a176ba1d6ff49b577ddf0a624222e:8:1"
+        ]
+      },
+      "reference_answer": "Create the store with an `index` config containing an embedding provider and `dims`, e.g. `InMemoryStore(index={\"embed\": embeddings, \"dims\": 1536})`."
+    },
+    {
+      "id": "q13",
+      "question": "How do you configure which fields of a stored item get embedded for semantic search?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/stores",
+        "section_heading": "Semantic search",
+        "chunk_ids": [
+          "56e286a0f0dc2095fc89eaa155c1c7e3:4:1"
+        ]
+      },
+      "reference_answer": "Configure `fields` in the store index (e.g. `[\"food_preference\", \"$\"]`), and/or pass `index=[...]` to `store.put(...)`. `index=False` stores without embedding."
+    },
+    {
+      "id": "q14",
+      "question": "Which LangGraph stream mode emits full state after each step, and which emits LLM tokens?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/streaming",
+        "section_heading": "Stream modes",
+        "chunk_ids": [
+          "1cf93e94e902b1c1ddad4854465d1b39:4:1"
+        ]
+      },
+      "reference_answer": "`values` emits full state after each step; `messages` emits 2-tuples of (LLM token, metadata). Other modes include updates, custom, checkpoints, tasks, and debug."
+    },
+    {
+      "id": "q15",
+      "question": "How do you replace a list in state instead of appending through its reducer?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "Bypass reducers with Overwrite",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:8:1"
+        ]
+      },
+      "reference_answer": "Return `Overwrite([...])` for that key (equivalently `{\"__overwrite__\": [...]}`), which bypasses the reducer and replaces the value."
+    },
+    {
+      "id": "q16",
+      "question": "How can a node pass private data to the next node without adding it to the public graph state?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "Pass private state between nodes",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:10:1",
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:10:2"
+        ]
+      },
+      "reference_answer": "Annotate the producing node with a private output TypedDict and the consuming node with a private input TypedDict, keeping the data out of the overall (public) state."
+    },
+    {
+      "id": "q17",
+      "question": "What are the caveats of using Pydantic models for graph state?",
+      "category": "conceptual",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "Use pydantic models for graph state",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:11:1"
+        ]
+      },
+      "reference_answer": "Output is not a Pydantic instance; validation only runs on the first node's input (not later nodes/outputs); validation errors do not say which node failed; recursive validation can be slow, so a dataclass may be better."
+    },
+    {
+      "id": "q18",
+      "question": "How do you restrict a graph to different input and output schemas?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "Define input and output schemas",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:9:1"
+        ]
+      },
+      "reference_answer": "Build with `StateGraph(OverallState, input_schema=InputState, output_schema=OutputState)`, and the graph only returns fields in the output schema."
+    },
+    {
+      "id": "q19",
+      "question": "How do you pass runtime configuration (such as selecting the model) into a node?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "Add runtime configuration",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:12:1",
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:12:2",
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:12:4"
+        ]
+      },
+      "reference_answer": "Define a `context_schema`, accept `Runtime[ContextSchema]` in the node, pass `context=...` to `invoke`, and declare it via `StateGraph(State, context_schema=...)`."
+    },
+    {
+      "id": "q20",
+      "question": "How do you cache a task's result with a TTL in the functional API?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-functional-api",
+        "section_heading": "Caching tasks",
+        "chunk_ids": [
+          "bece09b8709d12c49e64b0462891e4da:9:1"
+        ]
+      },
+      "reference_answer": "Decorate the task with `@task(cache_policy=CachePolicy(ttl=120))` and give the entrypoint a cache, e.g. `@entrypoint(cache=InMemoryCache())`."
+    },
+    {
+      "id": "q21",
+      "question": "How do you set a timeout on a task and on an entrypoint in the functional API?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-functional-api",
+        "section_heading": "Set task and entrypoint timeouts",
+        "chunk_ids": [
+          "bece09b8709d12c49e64b0462891e4da:8:1"
+        ]
+      },
+      "reference_answer": "Set `timeout=...` on `@task(...)` and/or `@entrypoint(timeout=5.0)`; timeouts raise `NodeTimeoutError`, which you can add to a RetryPolicy."
+    },
+    {
+      "id": "q22",
+      "question": "What is entrypoint.final used for?",
+      "category": "conceptual",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/functional-api",
+        "section_heading": "entrypoint.final",
+        "chunk_ids": [
+          "f1291c0560730f0795ed482066ad63c1:9:1"
+        ]
+      },
+      "reference_answer": "`entrypoint.final(value=..., save=...)` returns one value to the caller while saving a different value to the checkpoint for the next invocation's `previous` argument."
+    },
+    {
+      "id": "q23",
+      "question": "When should you choose the Graph API over the Functional API?",
+      "category": "comparison",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/choosing-apis",
+        "section_heading": "Quick decision guide",
+        "chunk_ids": [
+          "0d5c39dd70f7cecbd3d91c199bd2501c:2:1"
+        ]
+      },
+      "reference_answer": "Choose the Graph API for complex workflow visualization, explicit shared state across nodes, conditional branching, parallel paths that merge, and team collaboration. The Functional API suits minimal procedural code, standard control flow, and rapid prototyping."
+    },
+    {
+      "id": "q24",
+      "question": "What are the three subgraph persistence modes and the checkpointer setting for each?",
+      "category": "factual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-subgraphs",
+        "section_heading": "Subgraph persistence",
+        "chunk_ids": [
+          "e7c54dcdaec81823b0f1bcd7ad47e851:6:1"
+        ]
+      },
+      "reference_answer": "Per-invocation: `checkpointer=None` (fresh each call, inherits parent); Per-thread: `checkpointer=True` (state accumulates per thread); Stateless: `checkpointer=False` (no checkpointing)."
+    },
+    {
+      "id": "q25",
+      "question": "How do you replay a graph from a previous checkpoint?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-time-travel",
+        "section_heading": "Replay",
+        "chunk_ids": [
+          "c8a4439b8b07243476abf28ff152cbcf:3:1"
+        ]
+      },
+      "reference_answer": "Get `graph.get_state_history(config)` (reverse chronological), pick the snapshot you want, then call `graph.invoke(None, snapshot.config)`."
+    },
+    {
+      "id": "q26",
+      "question": "How do you fork from a checkpoint and change state before resuming?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-time-travel",
+        "section_heading": "Fork",
+        "chunk_ids": [
+          "c8a4439b8b07243476abf28ff152cbcf:4:1"
+        ]
+      },
+      "reference_answer": "Find the checkpoint in history, call `fork_config = graph.update_state(snapshot.config, values={...})`, then `graph.invoke(None, fork_config)`."
+    },
+    {
+      "id": "q27",
+      "question": "What is the LastValue channel used for?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/pregel",
+        "section_heading": "LastValue",
+        "chunk_ids": [
+          "20b74787f60b58b240170b3af4e2dff7:3:1"
+        ]
+      },
+      "reference_answer": "LastValue stores the last value written to the channel; it is the default channel type, e.g. `LastValue(int)`."
+    },
+    {
+      "id": "q28",
+      "question": "Which channel accumulates all values written across steps?",
+      "category": "factual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/pregel",
+        "section_heading": "Topic",
+        "chunk_ids": [
+          "20b74787f60b58b240170b3af4e2dff7:4:1"
+        ]
+      },
+      "reference_answer": "The Topic channel with `accumulate=True`, e.g. `Topic(str, accumulate=True)`."
+    },
+    {
+      "id": "q29",
+      "question": "How do you use DeltaChannel in a state schema?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/pregel",
+        "section_heading": "DeltaChannel",
+        "chunk_ids": [
+          "20b74787f60b58b240170b3af4e2dff7:6:1"
+        ]
+      },
+      "reference_answer": "Annotate the field with a reducer: `Annotated[list[str], DeltaChannel(my_reducer)]`."
+    },
+    {
+      "id": "q30",
+      "question": "In the agentic RAG tutorial, what does grade_documents decide and what does it return?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/agentic-rag",
+        "section_heading": "4. Grade documents",
+        "chunk_ids": [
+          "5a22556ccf6c2067ba8cdbe38d7372d7:7:2"
+        ]
+      },
+      "reference_answer": "It grades retrieved documents for relevance using structured output (binary 'yes'/'no') and returns the next node name: 'generate_answer' or 'rewrite_question'."
+    },
+    {
+      "id": "q31",
+      "question": "Why does the agentic RAG graph rewrite the user question?",
+      "category": "conceptual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/agentic-rag",
+        "section_heading": "5. Rewrite question",
+        "chunk_ids": [
+          "5a22556ccf6c2067ba8cdbe38d7372d7:8:1"
+        ]
+      },
+      "reference_answer": "Because the retriever can return irrelevant documents; rewriting reasons about the underlying semantic intent to formulate an improved question."
+    },
+    {
+      "id": "q32",
+      "question": "How do you add human-in-the-loop review to a tool call before it executes?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/sql-agent",
+        "section_heading": "6. Implement human-in-the-loop review",
+        "chunk_ids": [
+          "1f87bae921a5cb88216297b8aa71ab73:10:1",
+          "1f87bae921a5cb88216297b8aa71ab73:10:3"
+        ]
+      },
+      "reference_answer": "Wrap the tool so it calls `interrupt([request])` and handles the response types: 'accept' (run as-is), 'edit' (update args), or 'response' (return user feedback); then use it in a ToolNode."
+    },
+    {
+      "id": "q33",
+      "question": "What checkpointer options are mentioned for development vs production persistence?",
+      "category": "factual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+        "section_heading": "MemorySaver does not persist between restarts",
+        "chunk_ids": [
+          "56c96468ff8ed24caf2a2220436ebf5e:5:1"
+        ]
+      },
+      "reference_answer": "MemorySaver does not persist between restarts; PostgresSaver provides PostgreSQL with async support; SqliteSaver is local file-based storage for development."
+    },
+    {
+      "id": "q34",
+      "question": "How do you resolve a PostgresSaver 'thread_id too long' error?",
+      "category": "troubleshooting",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+        "section_heading": "PostgresSaver: thread_id too long",
+        "chunk_ids": [
+          "56c96468ff8ed24caf2a2220436ebf5e:4:1"
+        ]
+      },
+      "reference_answer": "Truncate the thread id to the column limit, e.g. `str(uuid.uuid4())[:255]`."
+    },
+    {
+      "id": "q35",
+      "question": "How can you keep checkpoint storage from growing unboundedly?",
+      "category": "troubleshooting",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+        "section_heading": "Checkpoints growing unboundedly",
+        "chunk_ids": [
+          "56c96468ff8ed24caf2a2220436ebf5e:6:1"
+        ]
+      },
+      "reference_answer": "Call `checkpointer.setup()` to create tables with indexes, and add a cron job to delete checkpoints older than N days."
+    },
+    {
+      "id": "q36",
+      "question": "What is the prompt chaining workflow pattern?",
+      "category": "conceptual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "Prompt chaining",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:4:1",
+          "509c377f5b1584c8167ede5dbc671e19:4:2",
+          "509c377f5b1584c8167ede5dbc671e19:4:3"
+        ]
+      },
+      "reference_answer": "Decompose a task into a sequence of steps/LLM calls, optionally with gate checks between them (e.g. verify a joke has a punchline before continuing)."
+    },
+    {
+      "id": "q37",
+      "question": "What are the two main reasons to parallelize steps in a workflow?",
+      "category": "conceptual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "Parallelization",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:5:1"
+        ]
+      },
+      "reference_answer": "To increase speed by splitting subtasks that run in parallel, and to increase confidence by running a task multiple times and checking different outputs."
+    },
+    {
+      "id": "q38",
+      "question": "How is routing typically implemented in LangGraph?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "Routing",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:6:2",
+          "509c377f5b1584c8167ede5dbc671e19:6:3"
+        ]
+      },
+      "reference_answer": "An LLM router uses structured output to pick a route, and a conditional edge function maps that decision to the target node."
+    },
+    {
+      "id": "q39",
+      "question": "What are the roles in the orchestrator-worker pattern?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "Orchestrator-worker",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:7:2",
+          "509c377f5b1584c8167ede5dbc671e19:7:3"
+        ]
+      },
+      "reference_answer": "An orchestrator plans and breaks the task into subtasks, workers execute them (often in parallel), and a synthesizer combines the worker outputs into a final result."
+    },
+    {
+      "id": "q40",
+      "question": "How does the evaluator-optimizer pattern improve output?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "Evaluator-optimizer",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:9:2"
+        ]
+      },
+      "reference_answer": "A generator produces output, an evaluator grades it (structured output with feedback), and a conditional edge loops back to the generator when rejected until it is accepted."
+    },
+    {
+      "id": "q41",
+      "question": "How do you add a ToolNode that runs a set of tools?",
+      "category": "howto",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/workflows-agents",
+        "section_heading": "ToolNode",
+        "chunk_ids": [
+          "509c377f5b1584c8167ede5dbc671e19:11:1"
+        ]
+      },
+      "reference_answer": "Add a node with `ToolNode([search, calculator])` using tools created with the `@tool` decorator."
+    },
+    {
+      "id": "q42",
+      "question": "Why keep raw data in state and format prompts on demand?",
+      "category": "conceptual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/thinking-in-langgraph",
+        "section_heading": "Keep state raw, format prompts on-demand",
+        "chunk_ids": [
+          "fba63f4a7a9214a0e9918f27f24efb98:9:1"
+        ]
+      },
+      "reference_answer": "Different nodes can format the same data differently, you can change prompt templates without changing the state schema, debugging is clearer, and the agent can evolve without breaking existing state."
+    },
+    {
+      "id": "q43",
+      "question": "How do you detect whether a thread is paused or in-flight?",
+      "category": "howto",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/backward-compatibility",
+        "section_heading": "Detecting in-flight threads",
+        "chunk_ids": [
+          "40754e459823abb3a0264ee74bc10403:4:1"
+        ]
+      },
+      "reference_answer": "`graph.get_state(config)` returns the latest checkpoint (node paused at, pending interrupts); `graph.get_state_history(config)` returns the full chronological list."
+    },
+    {
+      "id": "q44",
+      "question": "How do you test a graph starting from a middle node without running earlier nodes?",
+      "category": "howto",
+      "difficulty": "hard",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/test",
+        "section_heading": "Partial execution",
+        "chunk_ids": [
+          "9498b2d31e5c2032452198510ba723e6:5:1",
+          "9498b2d31e5c2032452198510ba723e6:5:2"
+        ]
+      },
+      "reference_answer": "Compile with a checkpointer, call `update_state(..., as_node=<previous node>)`, then `invoke(None, config, interrupt_after=<node>)` to stop at the target node."
+    },
+    {
+      "id": "q45",
+      "question": "What command launches the local LangGraph dev server and what does it expose?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/local-server",
+        "section_heading": "5. Launch Agent server",
+        "chunk_ids": [
+          "a19266aa2103227f1b7c57e5285b6e3e:7:1"
+        ]
+      },
+      "reference_answer": "`langgraph dev` starts an in-memory dev server exposing the API at http://127.0.0.1:2024, the Studio UI, and API docs at /docs."
+    },
+    {
+      "id": "q46",
+      "question": "How do you trace only a specific block of code with LangSmith?",
+      "category": "howto",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/observability",
+        "section_heading": "Trace selectively",
+        "chunk_ids": [
+          "b82d758c97734c8727e8edbc9e9a1ab8:4:1"
+        ]
+      },
+      "reference_answer": "Wrap the block in `with ls.tracing_context(enabled=True):` so only that block is traced."
+    },
+    {
+      "id": "q47",
+      "question": "What does the MessagesState shorthand represent?",
+      "category": "factual",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/use-graph-api",
+        "section_heading": "MessagesState",
+        "chunk_ids": [
+          "b3e8bbe5d2f6673784dfc30a7a49d3db:7:1"
+        ]
+      },
+      "reference_answer": "It is a state schema with `messages: Annotated[list[AnyMessage], add_messages]`; you can subclass it to add extra fields."
+    },
+    {
+      "id": "q48",
+      "question": "In a reducer, what do the left and right arguments represent?",
+      "category": "factual",
+      "difficulty": "medium",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/graph-api",
+        "section_heading": "Reducer arguments",
+        "chunk_ids": [
+          "e9b2a73f9cb969336b2a92ffcc2c4dfc:5:1"
+        ]
+      },
+      "reference_answer": "Left is the current value already stored in state; right is the update returned by the node. The reducer returns the merged value."
+    },
+    {
+      "id": "q49",
+      "question": "How do you connect the START node to the first node in a graph?",
+      "category": "howto",
+      "difficulty": "easy",
+      "gold": {
+        "url": "https://docs.langchain.com/oss/python/langgraph/graph-api",
+        "section_heading": "START node",
+        "chunk_ids": [
+          "e9b2a73f9cb969336b2a92ffcc2c4dfc:12:1"
+        ]
+      },
+      "reference_answer": "Import START and call `graph.add_edge(START, \"node_a\")`."
+    }
+  ]
+}

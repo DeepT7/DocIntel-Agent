@@ -1,0 +1,18 @@
+# Core ingestion + retrieval pipeline
+requests==2.33.1
+beautifulsoup4==4.15.0
+lxml==6.1.1
+python-dotenv==1.2.2
+google-genai==2.12.1
+qdrant-client==1.19.1
+rank-bm25==0.2.2
+
+# Reasoning graph + CLI
+langgraph==1.2.9
+rich==15.0.0
+
+# Observability (optional; tracing is a no-op when unconfigured)
+langfuse==4.15.4
+
+# Schema (also used by the serving layer)
+pydantic==2.13.4
