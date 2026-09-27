@@ -41,6 +41,9 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
   rewrite entirely (no extra latency or API cost).
 - **Evaluation harness** — `hit@k`, `recall@k`, `precision@k`, `MRR@k` over a
   49-question gold set, with caching and per-category / per-difficulty breakdowns.
+- **Answer-level evaluation** — an LLM-as-judge scores faithfulness, answer relevance,
+  and citation accuracy of the generated answers, using a judge model distinct from the
+  generation chain to reduce self-preference bias.
 - **Optional Langfuse tracing** — opt-in, no-op when keys are absent.
 - **Provider-agnostic** — Gemini (`google-genai`) or OpenRouter for embeddings and
   answer generation, selectable via environment variables.
@@ -69,7 +72,8 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 │   │   ├── answer.py          # prompt building, generation, follow-up condensing
 │   │   └── rag_graph.py       # LangGraph pipeline + interactive Rich CLI
 │   └── evaluation/
-│       └── run_eval.py        # retrieval benchmark over the gold question set
+│       ├── run_eval.py        # retrieval benchmark over the gold question set
+│       └── answer_eval.py     # answer-level evaluation with an LLM-as-judge
 ├── data/
 │   ├── raw/                   # crawled HTML + metadata JSON (keyed by md5 of URL)
 │   ├── cleaned/               # structured documents
@@ -80,8 +84,9 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 │   └── samples/               # sample images for the scratch demos
 ├── output/
 │   ├── qdrant_db/             # local Qdrant storage
-│   ├── eval_report.json       # latest benchmark report
-│   └── eval_cache.json        # cached retrieval results
+│   ├── eval_report.json       # latest retrieval benchmark report
+│   ├── eval_cache.json        # cached retrieval results
+│   └── answer_eval/           # cached answers, judgements, and report
 ├── scratch/                   # standalone learning/demo scripts (not part of the pipeline)
 │   ├── core_chatbot.py        # raw Gemini text / multimodal / image demos
 │   └── langgraph_simple.py    # minimal single-node LangGraph example
@@ -205,6 +210,17 @@ Useful flags:
 Gold labels are defined by *(url, section_heading)* and re-pointed at the current
 corpus on every run, so chunker changes do not silently invalidate the benchmark.
 
+### 5. Evaluate answer quality
+
+```bash
+python -m app.evaluation.answer_eval              # generate answers + judge (cached)
+python -m app.evaluation.answer_eval --judge-only # score only, reuse cached answers
+python -m app.evaluation.answer_eval --no-cache   # regenerate answers and judgements
+```
+
+Answers and judgements are cached under `output/answer_eval/`, so re-runs only fill in
+missing entries. The aggregated report is written to `output/answer_eval/report.json`.
+
 ---
 
 ## The RAG graph
@@ -245,6 +261,25 @@ Latest benchmark (`output/eval_report.json`, 49 questions):
 
 On this corpus, pure dense retrieval outperforms the current hybrid fusion;
 the hybrid path is kept as an evaluated alternative.
+
+### Answer-level evaluation (LLM-as-judge)
+
+Retrieval metrics only tell us whether the right chunk was surfaced. To measure the
+**final answer**, `app/evaluation/answer_eval.py` generates one answer per gold question
+and scores it with an LLM judge on three axes:
+
+| Criterion | Mean (n=49) |
+| --- | --- |
+| faithfulness | 4.94 |
+| answer_relevance | 5.00 |
+| citation_accuracy | 4.82 |
+
+- The judge model (`qwen/qwen3-30b-a3b-instruct-2507`) is deliberately different from
+  the generation chain to avoid **self-preference bias**.
+- The judge is asked for a **flat JSON object**; the parser also tolerates nested or
+  loose variants, and a malformed response skips that question instead of crashing.
+- Answers and judgements are cached under `output/answer_eval/`, so re-runs only fill
+  missing entries; the report is written to `output/answer_eval/report.json`.
 
 ---
 
@@ -307,7 +342,7 @@ services, and governance.
 ## Roadmap
 
 - [ ] **Serving layer** — FastAPI (`/ingest`, streaming `/query`), Pydantic schemas, Docker + compose
-- [ ] **Answer-level evaluation** — faithfulness, groundedness, citation accuracy; LLM-as-judge
+- [x] **Answer-level evaluation** — faithfulness, groundedness, citation accuracy; LLM-as-judge
 - [ ] **Agentic retrieval** — retrieval as a tool, grade → rewrite → re-retrieve loop
 - [ ] **CI quality gate** — pytest + eval thresholds to block regressions
 - [ ] **Production hardening** — Redis cache, rate limiting, guardrails / prompt-injection defence
