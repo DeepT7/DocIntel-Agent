@@ -6,10 +6,11 @@ from google.genai import types
 from langgraph.graph import StateGraph, START, END
 
 from app.core.models import ExternalSource, RAGState
-from app.reasoning.answer import condense_question, format_context, generate_answer
+from app.reasoning.answer import condense_question, format_context, generate_answer, grade_documents, rewrite_query
 from app.core.config import DEFAULT_MODEL, DEFAULT_TOP_K
-from app.retrieval.retrieve import hybrid_search
+from app.retrieval.retrieve import hybrid_search, vector_search
 from app.core.tracing import observe, update_current_span, set_trace_io, trace_context, flush_traces
+from app.core.text import clean_text
 
 load_dotenv()
 
@@ -36,7 +37,8 @@ def condense_node(state: RAGState) -> dict:
 @observe("retrieve_node", as_type="retriever")
 def retrieve_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    results = hybrid_search(query, top_k=DEFAULT_TOP_K)
+    # results = hybrid_search(query, top_k=DEFAULT_TOP_K)
+    results = vector_search(query, top_k=DEFAULT_TOP_K)
     update_current_span(
         output=[
             {"chunk_id": r.get("chunk_id"), "title": r.get("title"), "score": round(r.get("score", 0.0), 4)}
@@ -49,11 +51,39 @@ def retrieve_node(state: RAGState) -> dict:
         "retrieved_chunks": results,
     }
 
+@observe("grade_node", capture_output=False)
+def grade_node(state: RAGState) -> dict:
+    query = state.get("standalone_query") or state["query"]
+    chunks = state.get("retrieved_chunks", [])
+    top_score = chunks[0].get("score", 0.0) if chunks else 0.0
+    # Skip the (slow) LLM grading call when retrieval is already confident.
+    if top_score >= 0.5:
+        update_current_span(num_chunks=len(chunks), num_relevant=len(chunks), gated=True)
+        return {"relevant_chunks": chunks, "graded_ok": bool(chunks)}
+    indices = grade_documents(query, chunks)
+    relevant = [chunks[i] for i in indices] if chunks else []
+    update_current_span(num_chunks=len(chunks), num_relevant=len(relevant), gated=False)
+    return {"relevant_chunks": relevant, "graded_ok": bool(relevant)}
+    
+
+@observe("rewrite_node", capture_output=False)
+def rewrite_node(state: RAGState) -> dict:
+    query = state.get("standalone_query") or state["query"]
+    rewritten = rewrite_query(query)
+    update_current_span(original=query, rewritten=rewritten)
+    return {"standalone_query": rewritten, "rewrite_count": state.get("rewrite_count", 0) + 1}
+
+def route_after_grade(state: RAGState):
+    if state.get("graded_ok"):
+        return "answer"
+    if state.get("rewrite_count", 0) < 1: # Permitted to rewrite one time
+        return "rewrite"
+    return "external_search"
 
 @observe("answer_node", capture_output=False)
 def answer_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    retrieved_chunks = state.get("retrieved_chunks", [])
+    retrieved_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
     context = format_context(retrieved_chunks)
     answer = generate_answer(query, context)
     update_current_span(output=answer, num_sources=len(retrieved_chunks), answer_chars=len(answer))
@@ -62,30 +92,6 @@ def answer_node(state: RAGState) -> dict:
         "context": context,
         "answer": answer,
         "sources": retrieved_chunks,
-    }
-
-
-@observe("judge_node")
-def judge_node(state: RAGState) -> dict:
-    result = state.get("retrieved_chunks", [])
-
-    if not result:
-        update_current_span(output={"retrieval_ok": False}, retrieval_ok=False)
-        return {
-            "retrieval_ok": False,
-            "retrieval_reason": "No relevant information found.",
-        }
-    top_score = result[0].get("score", 0)
-    if top_score < 0.1:
-        update_current_span(output={"retrieval_ok": False, "top_score": top_score}, retrieval_ok=False, top_score=top_score)
-        return {
-            "retrieval_ok": False,
-            "retrieval_reason": f"Top score {top_score:.4f} is below the threshold.",
-        }
-    update_current_span(output={"retrieval_ok": True, "top_score": top_score}, retrieval_ok=True, top_score=top_score)
-    return {
-        "retrieval_ok": True,
-        "retrieval_reason": "Relevant information found.",
     }
 
 def _extract_external_sources(response) -> list[ExternalSource]:
@@ -138,7 +144,7 @@ def _format_external_context(answer_text: str, sources: list[ExternalSource]) ->
 
 @observe("external_search_node", capture_output=False)
 def external_search_node(state: RAGState) -> dict:
-    query = state["query"].strip()
+    query = (state.get("standalone_query") or state["query"]).strip()
     if not query:
         return {
             "external_ok": False,
@@ -182,7 +188,7 @@ def external_search_node(state: RAGState) -> dict:
 @observe("answer_with_fallback_node", capture_output=False)
 def answer_with_fallback_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    internal_chunks = state.get("retrieved_chunks", [])
+    internal_chunks = state.get("relevant_chunks") or  state.get("retrieved_chunks", [])
     internal_context = format_context(internal_chunks) if internal_chunks else ""
     external_context = state.get("external_context", "").strip()
 
@@ -215,11 +221,6 @@ def fallback_node(state: RAGState) -> dict:
         "sources": [],
     }
 
-def route_after_retrieval(state: RAGState) -> str:
-    if state.get("retrieval_ok", False):
-        return "answer"
-    return "external_search"
-
 
 def route_after_external_search(state: RAGState) -> str:
     if state.get("external_ok", False):
@@ -230,19 +231,18 @@ builder = StateGraph(RAGState)
 builder.add_node("condense", condense_node)
 builder.add_node("retrieve", retrieve_node)
 builder.add_node("answer", answer_node)
-builder.add_node("judge", judge_node)
+builder.add_node("grade", grade_node)
+builder.add_node("rewrite", rewrite_node)
 builder.add_node("external_search", external_search_node)
 builder.add_node("answer_with_fallback", answer_with_fallback_node)
 builder.add_node("fallback", fallback_node)
 
 builder.add_edge(START, "condense")
 builder.add_edge("condense", "retrieve")
-builder.add_edge("retrieve", "judge")
-builder.add_conditional_edges("judge", route_after_retrieval,
-                             {
-                                 "answer": "answer",
-                                 "external_search": "external_search",
-                             },)
+builder.add_edge("retrieve", "grade")
+builder.add_conditional_edges("grade", route_after_grade,
+                              {"answer": "answer", "rewrite": "rewrite", "external_search": "external_search"})
+builder.add_edge("rewrite", "retrieve")
 builder.add_conditional_edges("external_search", route_after_external_search,
                              {
                                  "answer_with_fallback": "answer_with_fallback",
@@ -256,6 +256,7 @@ graph = builder.compile()
 
 @observe("run_rag", capture_input=False, capture_output=False)
 def run_rag(query: str, chat_history: list[dict] | None = None) -> RAGState:
+    query = clean_text(query)
     history = chat_history or []
     with trace_context(
         trace_name="run_rag",
@@ -295,7 +296,7 @@ def run_cli() -> None:
         turns = len(history) // 2
         prompt = f"\n[bold cyan]Question[/bold cyan][dim]({turns} turns)[/dim][bold cyan] >[/bold cyan] "
         try:
-            query = console.input(prompt).strip()
+            query = clean_text(console.input(prompt)).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()
             break

@@ -86,15 +86,29 @@ DEFAULT_MODEL = "gemini-3.5-flash"
 
 # Answer generation provider: "gemini" (google-genai) or "openrouter".
 GENERATION_PROVIDER = os.getenv("GENERATION_PROVIDER", "openrouter")
-# Comma-separated fallback chain, tried in order. Free models are tried first;
-# the last entry is a cheap paid model used only if every free model is down.
+# Comma-separated fallback chain, tried in order (each entry must end with a
+# comma except the last). A reliable paid model comes first; free models are
+# fallbacks; the last entry is an instruct model used as a safety net.
 OPENROUTER_GENERATION_MODELS = [
     model.strip()
     for model in os.getenv(
         "OPENROUTER_GENERATION_MODELS",
+        "z-ai/glm-4.7-flash,"
         "nvidia/nemotron-3-super-120b-a12b:free,"
-        "inclusionai/ling-3.0-flash-sante:free,"
+        "qwen/qwen3-30b-a3b-instruct-2507"
     ).split(",")
     if model.strip()
 ]
 OPENROUTER_GENERATION_MODEL = OPENROUTER_GENERATION_MODELS[0]
+
+# Fast, non-reasoning model for auxiliary LLM tasks (condense, grade, rewrite).
+# Reasoning models spend seconds "thinking" before answering, which is wasteful
+# for tasks that emit one short sentence or a tiny JSON object.
+OPENROUTER_UTILITY_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "OPENROUTER_UTILITY_MODELS",
+        "qwen/qwen3-30b-a3b-instruct-2507"
+    ).split(",")
+    if model.strip()
+]

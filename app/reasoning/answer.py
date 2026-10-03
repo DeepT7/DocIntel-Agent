@@ -1,5 +1,6 @@
 from app.retrieval.retrieve import vector_search
 import os
+import re
 import time
 import requests
 from google import genai
@@ -9,6 +10,13 @@ from app.core.config import (
     GENERATION_PROVIDER,
     OPENROUTER_BASE_URL,
     OPENROUTER_GENERATION_MODELS,
+    OPENROUTER_UTILITY_MODELS,
+)
+from app.core.prompts import (
+    build_answer_prompt,
+    build_condense_prompt,
+    build_grade_prompt,
+    build_rewrite_prompt
 )
 from app.core.models import AnswerResult, ExternalSource, RetrievedChunk
 from dotenv import load_dotenv
@@ -51,42 +59,32 @@ def format_context(results: list[RetrievedChunk | ExternalSource]) -> str:
 
     return "\n\n".join(context_parts)
 
+# Models that recently failed are skipped for a while, so every call does not
+# waste time re-trying a model that is rate-limited or down.
+_MODEL_COOLDOWN: dict[str, float] = {}
+COOLDOWN_SECONDS = 300
 
-def build_prompt(query: str, context: str) -> str:
-    """
-    Build a prompt for the language model based on the query and context.
-    """
-    prompt = (
-        "You are a documentation assistant.\n\n" 
-        "Use the retrieved context as the primary source of truth.\n"
-        "You may also use your general knowledge to provide additional explanation when it helps, but do not present unsupported details as if they were confirmed by the retrieved context.\n\n"
 
-        "If the retrieved context clearly supports the answer:\n"
-        "- answer directly\n"
-        "- mention the most relevant sources"
+def _ready_models(models: list[str]) -> list[str]:
+    now = time.time()
+    ready = [m for m in models if _MODEL_COOLDOWN.get(m, 0.0) <= now]
+    return ready or list(models)  # all cooling down -> try anyway
 
-        "\n\nIf the retrieved context only partially supports the answer:"
-        "- answer with caution\n"
-        "- clearly distinguish what is supported by the retrieved context and what is based on general knowledge or inference\n"
-        "Do not invent specific APIs, parameters, or behaviors that are not grounded in the retrieved context."
 
-        "User question:\n{query}\n\n"
-        "Retrieved context:\n{context}\n\n"
-        "Answer:"
-    )
-
-    return prompt.format(query=query, context=context)
+def _cooldown(model: str) -> None:
+    _MODEL_COOLDOWN[model] = time.time() + COOLDOWN_SECONDS
 
 
 def _generate_openrouter(
     prompt: str,
     models: list[str] | None = None,
     max_retries: int = 3,
+    max_tokens: int = 4096,
 ) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise RuntimeError("Set OPENROUTER_API_KEY to use the OpenRouter provider.")
-    models = models or OPENROUTER_GENERATION_MODELS
+    models = _ready_models(models or OPENROUTER_GENERATION_MODELS)
     url = f"{OPENROUTER_BASE_URL}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -94,42 +92,64 @@ def _generate_openrouter(
     }
     payload = {
         "messages": [{"role": "user", "content": prompt}],
-        # Generous cap: reasoning models spend tokens on hidden reasoning before
-        # emitting content, and a low cap can leave the content empty.
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
+        # Let OpenRouter route to another provider when the first one flakes.
+        "provider": {"allow_fallbacks": True},
+        # Reasoning models otherwise spend seconds (and tokens) on hidden
+        # chain-of-thought before answering. Ignored by models that lack it.
+        "reasoning": {"enabled": False},
     }
 
     last_error = "no models configured"
     for model in models:
+        payload["model"] = model
         for attempt in range(max_retries):
-            payload["model"] = model
             response = requests.post(url, headers=headers, json=payload, timeout=180)
+
             if response.status_code in (429, 500, 502, 503, 504, 529):
                 last_error = f"{model}: HTTP {response.status_code}"
                 if attempt == max_retries - 1:
-                    print(f"generate: {model} failed ({last_error}), trying next model")
+                    _cooldown(model)
+                    print(f"generate: {model} failed ({last_error}), cooling down {COOLDOWN_SECONDS}s")
                     break
                 retry_after = response.headers.get("Retry-After")
                 delay = float(retry_after) if retry_after else 3.0 * (2**attempt)
                 print(f"generate: {model} retry {attempt + 1}/{max_retries} after {delay:.0f}s (HTTP {response.status_code})")
                 time.sleep(delay)
                 continue
+
             response.raise_for_status()
-            choices = response.json().get("choices", [])
-            content = (choices[0].get("message", {}).get("content") or "").strip() if choices else ""
+            body = response.json()
+            choice = (body.get("choices") or [{}])[0]
+            content = (choice.get("message", {}).get("content") or "").strip()
+
             if content:
+                used = body.get("model", model)
+                provider = body.get("provider")
+                suffix = f" (provider={provider})" if provider else ""
+                print(f"generate: used model {used}{suffix}")
                 return content
+
+            # Empty content: usually a flaky provider, or reasoning tokens ate the
+            # budget. Retry the same model before giving up on it.
             last_error = f"{model}: empty content"
-            print(f"generate: {model} returned empty content, trying next model")
+            print(
+                f"generate: {model} empty "
+                f"(finish={choice.get('finish_reason')}, usage={body.get('usage')})"
+            )
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            _cooldown(model)
             break
 
     raise RuntimeError(f"generate(openrouter) failed for all models: {last_error}")
 
 
-def _generate(prompt: str) -> str:
+def _generate(prompt: str, models: list[str] | None = None, max_tokens: int = 4096) -> str:
     """Send a raw prompt to the configured generation provider."""
     if GENERATION_PROVIDER == "openrouter":
-        return _generate_openrouter(prompt)
+        return _generate_openrouter(prompt, models=models, max_tokens=max_tokens)
     response = _get_gemini_client().models.generate_content(
         model=DEFAULT_MODEL,
         contents=prompt,
@@ -138,7 +158,7 @@ def _generate(prompt: str) -> str:
 
 
 def generate_answer(query: str, context: str) -> str:
-    return _generate(build_prompt(query, context))
+    return _generate(build_answer_prompt(query, context), max_tokens=700)
 
 
 def format_history(history: list[dict], max_messages: int = 6) -> str:
@@ -148,22 +168,6 @@ def format_history(history: list[dict], max_messages: int = 6) -> str:
         role = "User" if message.get("role") == "user" else "Assistant"
         lines.append(f"{role}: {message.get('content', '')}")
     return "\n".join(lines)
-
-
-def build_condense_prompt(question: str, history_text: str) -> str:
-    return (
-        "Given the conversation so far and a follow-up question, rewrite the "
-        "follow-up into a single, self-contained question that can be used to "
-        "search a documentation index.\n"
-        "Keep the original language, all entities, and the full intent. Do not "
-        "answer the question. Do not repeat or quote the follow-up question. "
-        "If it is already self-contained, return it unchanged.\n"
-        "Return ONLY the rewritten question, with no preamble, on one line.\n\n"
-        f"Conversation:\n{history_text}\n\n"
-        f"Follow-up question: {question}\n\n"
-        "Standalone question:"
-    )
-
 
 def condense_question(question: str, history: list[dict]) -> str:
     """Resolve a follow-up question into a standalone one using chat history.
@@ -175,7 +179,9 @@ def condense_question(question: str, history: list[dict]) -> str:
         return question
     prompt = build_condense_prompt(question, format_history(history))
     try:
-        rewritten = _generate(prompt).strip().strip('"').strip()
+        rewritten = _generate(
+            prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=128
+        ).strip().strip('"').strip()
     except Exception as error:
         print(f"condense_question failed, using original question: {error}")
         return question
@@ -219,6 +225,24 @@ def answer_question(query: str, top_k: int = DEFAULT_TOP_K) -> AnswerResult:
         "context": context,
         "sources": results,
     }
+
+def grade_documents(question, chunks, max_chars=700):
+    listing = []
+    for i, c in enumerate(chunks):
+        text = (c.get("text") or "")[:max_chars].replace("\n", " ")
+        listing.append(f"[{i}] {c.get('section_heading', '')} | {text}")
+    prompt = build_grade_prompt(question, listing)
+    raw = _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=256)
+    m = re.search(r'"relevant_indices"\s*:\s*\[([^\]]*)\]', raw)
+    if not m: 
+        print(f"grade_documents: unparsable response, failing open: {raw[:120]!r}")
+        return list(range(len(chunks)))
+    return [int(x) for x in re.findall(r"\d+", m.group(1)) if int(x) < len(chunks)]
+
+def rewrite_query(question):
+    prompt = build_rewrite_prompt(question)
+    return _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=128).strip() or question.strip() or question
+
 
 if __name__ == "__main__":
     query = input("Question: ").strip()

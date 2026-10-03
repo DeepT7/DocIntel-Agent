@@ -6,6 +6,8 @@ from pathlib import Path
 
 from app.reasoning.rag_graph import run_rag, flush_traces
 from app.reasoning.answer import _generate_openrouter
+from app.core.text import clean_data
+from app.core.prompts import build_judge_prompt
 
 QUESTION_PATH = Path("data/eval/questions.json")
 OUT_DIR = Path("output/answer_eval")
@@ -31,7 +33,7 @@ def load_json(path):
 
 def save_json(path, data):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    Path(path).write_text(json.dumps(clean_data(data), indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 # Step 2 - Generate answers
@@ -57,37 +59,6 @@ def generate_answers(questions, use_cache=True):
     return cache
 
 # Step 3 - Judge prompt 
-JUDGE_PROMPT = """You are a strict evaluator of a retrieval-augmented QA system.
-Score the ANSWER on three criteria, each an integer from 1 to 5.
-
-1. faithfulness: every factual claim in the ANSWER is supported by the RETRIEVED CONTEXT.
-   - 5 = fully supported; 1 = mostly invented / unsupported.
-2. answer_relevance: the ANSWER directly and completely addresses the QUESTION.
-   - 5 = on-topic and complete; 1 = off-topic or does not answer.
-3. citation_accuracy: sources cited in the ANSWER actually support the claims attributed to them.
-   - 5 = all citations correct; 1 = citations wrong; use 3 if no citations are present.
-
-Respond with ONLY a flat JSON object with exactly these keys:
-{"faithfulness": <int>, "faithfulness_reason": "<string>",
- "answer_relevance": <int>, "answer_relevance_reason": "<string>",
- "citation_accuracy": <int>, "citation_accuracy_reason": "<string>"}
-
-QUESTION:
-__QUESTION__
-
-RETRIEVED CONTEXT:
-__CONTEXT__
-
-ANSWER:
-__ANSWER__
-"""
-
-def build_judge_prompt(question, context, answer):
-    return (JUDGE_PROMPT
-            .replace("__QUESTION__", question)
-            .replace("__CONTEXT__", context)
-            .replace("__ANSWER__", answer))
-
 
 def parse_scores(raw):
     text = (raw or "").strip()
