@@ -1,0 +1,44 @@
+{
+  "scope": "/mnt/f/LLM/DocIntel_Agent/data/docs",
+  "recent": [
+    "/mnt/f/LLM/DocIntel_Agent/data/docs",
+    "/mnt/f/LLM/DocIntel_Agent"
+  ],
+  "excluded_docs": [],
+  "conversations": {
+    "default": {
+      "messages": [],
+      "active_docs": [],
+      "primary_docs": [],
+      "last_used_docs": [],
+      "updated_at": 1792319167.243998
+    },
+    "f476a8c767124bb396449ccbba6a4e96": {
+      "messages": [],
+      "active_docs": [
+        "The False Promise of Imitating Proprietary LLMs.pdf"
+      ],
+      "primary_docs": [
+        "The False Promise of Imitating Proprietary LLMs.pdf"
+      ],
+      "last_used_docs": [
+        "The False Promise of Imitating Proprietary LLMs.pdf"
+      ],
+      "updated_at": 1792319215.369267
+    },
+    "ee065429f64c4bb9b4856ac4a0cfb15b": {
+      "messages": [],
+      "active_docs": [
+        "The Best Instruction-Tuning Data are Those That Fit.pdf",
+        "The False Promise of Imitating Proprietary LLMs.pdf"
+      ],
+      "primary_docs": [
+        "The Best Instruction-Tuning Data are Those That Fit.pdf"
+      ],
+      "last_used_docs": [
+        "The Best Instruction-Tuning Data are Those That Fit.pdf"
+      ],
+      "updated_at": 1792319279.5057867
+    }
+  }
+}

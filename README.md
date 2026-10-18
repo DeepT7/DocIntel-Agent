@@ -19,6 +19,9 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
                                                           └──► answer / fallback
 ```
 
+> **[PIPELINE.md](PIPELINE.md)** records the pipeline stages and how each one
+> processes data (transformations, decisions, inputs/outputs).
+
 ---
 
 ## Features
@@ -152,6 +155,17 @@ Tunable in `app/core/config.py`:
 ## Usage
 
 Run every stage from the repository root so the `app` package imports resolve.
+
+> **One process at a time (embedded Qdrant).** The vector store is embedded
+> (`output/qdrant_db`) and keeps a file lock, so only **one** process may use it.
+> Do not run the API server and a CLI/eval at the same time, and never start the
+> server with `--reload`. Check who holds the lock with
+> `python -m app.retrieval.store`, release it with
+> `python -m app.retrieval.store --stop`, then retry. For genuine concurrent
+> access, run a Qdrant server and set `QDRANT_URL` (embedded mode is bypassed).
+>
+> See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the full write-up of the
+> "Storage folder is already accessed" error.
 
 ### 1. Ingest
 

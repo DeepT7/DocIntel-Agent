@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DocIntel</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="logo">◆</span> DocIntel</div>
+      <div class="side-scroll">
+        <section class="tool">
+          <h2>Folder</h2>
+          <input id="scope" placeholder="/path/to/your/docs" autocomplete="off" spellcheck="false">
+          <div class="row">
+            <button id="btnUse">Use folder</button>
+            <button id="btnSync" class="ghost">Update index</button>
+          </div>
+          <div id="state" class="muted"></div>
+        </section>
+
+        <section class="tool">
+          <h2>Sources</h2>
+          <div class="row">
+            <button id="btnAllSrc" class="ghost">All</button>
+            <button id="btnNoneSrc" class="ghost">None</button>
+            <button id="btnCards" class="ghost">Cards</button>
+          </div>
+          <div id="srcHint" class="muted"></div>
+          <div id="sources" class="sources-list">
+            <div class="muted">Load a folder to list its files.</div>
+          </div>
+        </section>
+
+        <section class="tool">
+          <h2>Search</h2>
+          <input id="q" placeholder="keyword or phrase" autocomplete="off">
+          <div class="row">
+            <button id="btnSearch">Search</button>
+            <button id="btnSuggest" class="ghost">Suggest</button>
+          </div>
+          <div id="out" class="result"></div>
+        </section>
+
+        <section class="tool">
+          <h2>Insight</h2>
+          <input id="path" placeholder="memory.md" autocomplete="off">
+          <div class="row">
+            <button id="btnInsight">Create</button>
+            <button id="btnList" class="ghost">List</button>
+          </div>
+          <div id="iout" class="result"></div>
+        </section>
+      </div>
+    </aside>
+
+    <main class="chat">
+      <header class="chat-head">
+        <div class="head-left">
+          <div class="title">Ask <span class="muted">· multi-turn RAG over your folder</span></div>
+          <div id="workingset" class="workingset"></div>
+        </div>
+        <button id="btnClear" class="ghost">New chat</button>
+      </header>
+      <div id="messages" class="messages">
+        <div class="inner" id="msglist"></div>
+      </div>
+      <form id="composer" class="composer">
+        <div class="inner">
+          <textarea id="aq" rows="1" placeholder="Ask anything about your documents…"></textarea>
+          <button id="btnAsk" type="submit">Send</button>
+        </div>
+      </form>
+    </main>
+  </div>
+
+  <div id="status"></div>
+</body>
+</html>

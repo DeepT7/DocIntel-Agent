@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Trợ lý viết</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.5 system-ui, sans-serif; background: #1e1f22; color: #e6e6e6; }
+  header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #26272b; -webkit-app-region: drag; }
+  header .scope { flex: 1; font-size: 12px; color: #9aa0a6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button { background: #34363b; color: #e6e6e6; border: 1px solid #45474d; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+  button:hover { background: #3d4046; }
+  button.primary { background: #3b6ef5; border-color: #3b6ef5; color: #fff; }
+  main { padding: 12px; display: flex; flex-direction: column; gap: 10px; height: calc(100vh - 44px); }
+  label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #9aa0a6; }
+  textarea, input[type=text] { width: 100%; background: #17181a; color: #e6e6e6; border: 1px solid #34363b; border-radius: 6px; padding: 8px; resize: vertical; font: inherit; }
+  #clipboard { height: 96px; }
+  #result { flex: 1; overflow: auto; background: #17181a; border: 1px solid #34363b; border-radius: 6px; padding: 10px; white-space: pre-wrap; }
+  .sources { font-size: 12px; color: #9aa0a6; }
+  .sources div { padding: 2px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .muted { color: #9aa0a6; font-size: 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="scope" id="scope">Chưa chọn thư mục</span>
+    <button id="pick" title="Chọn thư mục">📁</button>
+  </header>
+  <main>
+    <div>
+      <label>Đoạn đang viết (clipboard)</label>
+      <textarea id="clipboard" placeholder="Bôi đen đoạn cần gợi ý rồi Ctrl+C, hoặc dán trực tiếp…"></textarea>
+    </div>
+    <div>
+      <label>Yêu cầu</label>
+      <input type="text" id="query" placeholder="VD: gợi ý viết tiếp phần này…">
+    </div>
+    <div class="row">
+      <button class="primary" id="ask">Gợi ý</button>
+      <button id="sync">Cập nhật kho</button>
+      <span class="muted" id="status"></span>
+    </div>
+    <div id="result" placeholder="Kết quả…"></div>
+    <div class="sources" id="sources"></div>
+    <div class="row" style="justify-content:flex-end;">
+      <button id="toMain">Mở trong cửa sổ chính</button>
+      <button id="hide">Ẩn</button>
+    </div>
+  </main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const call = (method, ...args) => window.pywebview.api[method](...args);
+
+  async function refreshScope() {
+    const st = await call("get_state");
+    $("scope").textContent = st.scope || "Chưa chọn thư mục";
+    $("scope").title = st.scope || "";
+  }
+
+  async function loadClipboard() {
+    const text = await call("read_clipboard");
+    if (text) $("clipboard").value = text;
+  }
+
+  window.onShow = async () => { await refreshScope(); await loadClipboard(); $("query").focus(); };
+
+  window.addEventListener("pywebviewready", async () => {
+    await refreshScope();
+    await loadClipboard();
+  });
+
+  $("pick").onclick = async () => { await call("pick_folder"); await refreshScope(); };
+  $("hide").onclick = () => call("hide_quick");
+
+  $("sync").onclick = async () => {
+    $("status").textContent = "Đang cập nhật…";
+    const stats = await call("sync");
+    $("status").textContent = stats.error ? stats.error
+      : `Đã cập nhật · changed=${stats.changed} · embedded=${stats.embeddings_computed}`;
+  };
+
+  $("ask").onclick = async () => {
+    const query = $("query").value.trim();
+    const clipboard = $("clipboard").value.trim();
+    if (!query && !clipboard) return;
+    $("status").textContent = "Đang xử lý…";
+    $("result").textContent = "";
+    $("sources").innerHTML = "";
+    try {
+      await call("sync");
+      const out = await call("suggest", query, clipboard);
+      $("status").textContent = "";
+      $("result").textContent = out.suggestion || out.error || "(không có kết quả)";
+      (out.sources || []).forEach((s, i) => {
+        const d = document.createElement("div");
+        d.textContent = `[${i + 1}] ${s.title || "?"} — ${s.section_title_clean || s.section_heading || s.path || ""}`;
+        $("sources").appendChild(d);
+      });
+    } catch (e) {
+      $("status").textContent = "Lỗi: " + e;
+    }
+  };
+
+  $("toMain").onclick = () => call("show_main", {
+    query: $("query").value, clipboard: $("clipboard").value, result: $("result").textContent
+  });
+</script>
+</body>
+</html>

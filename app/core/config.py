@@ -1,68 +1,18 @@
 from pathlib import Path
 import os
 
-DOCS_BASE_URL = "https://docs.langchain.com"
-REFERENCE_BASE_URL = "https://reference.langchain.com"
-
-CRAWL_ROOTS = [
-    DOCS_BASE_URL,
-]
-
-SITEMAP_URLS = [
-    f"{DOCS_BASE_URL}/sitemap.xml",
-]
-
-ALLOWED_DOMAINS = {
-    "docs.langchain.com",
-    "reference.langchain.com",
-}
-
-ALLOWED_PATH_PREFIXES = (
-    "/oss/python/langgraph",
-    "/python/langgraph",
-)
-
-EXCLUDED_PATH_HINTS = (
-    "/changelog",
-    "/release-notes",
-    "/mcp",
-    "/javascript",
-    "/typescript",
-)
-
-SKIP_FILE_EXTENSIONS = {
-    ".css",
-    ".js",
-    ".json",
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".svg",
-    ".ico",
-    ".pdf",
-    ".xml",
-    ".txt",
-    ".zip",
-}
-
-MAX_PAGES = 200
-REQUEST_TIMEOUT = 20
-USER_AGENT = "langgraph-rag-crawler/0.2"
-
+# Chunking
 CHUNK_TARGET_CHARS = 1200
 CHUNK_MAX_CHARS = 1800
 
 DATA_DIR = Path("data")
-RAW_DIR = DATA_DIR / "raw"
-CLEAN_DIR = DATA_DIR / "cleaned"
-CHUNK_DIR = DATA_DIR / "chunks"
-EMBED_DIR = DATA_DIR / "embeddings"
-GRAPH_DIR = DATA_DIR / "graph"
-SAMPLES_DIR = DATA_DIR / "samples"
+
+# Folder knowledge base (local documents)
+DOCS_DIR = DATA_DIR / "docs"
+INDEX_DIR = DATA_DIR / "index"
+SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".json", ".docx", ".pdf", ".html", ".htm"}
 
 # Retrieval settings
-EMBEDDINGS_PATH = EMBED_DIR / "corpus_embeddings.jsonl"
 EMBEDDING_MODEL = "gemini-embedding-2"
 DEFAULT_TOP_K = 5
 
@@ -71,13 +21,25 @@ DEFAULT_TOP_K = 5
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "openrouter")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_EMBEDDING_MODEL = os.getenv(
-    "OPENROUTER_EMBEDDING_MODEL", "google/gemini-embedding-2"
+    "OPENROUTER_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b"
 )
-EMBEDDING_DIM = 3072
+EMBEDDING_DIM = 4096
 
 # Qdrant settings
+# Embedded mode (path) allows only ONE process at a time. Set QDRANT_URL to an
+# HTTP endpoint (e.g. http://localhost:6333) to use a real Qdrant server instead,
+# which allows many processes to share the same data concurrently.
+QDRANT_URL = os.getenv("QDRANT_URL", "").strip()
 QDRANT_PATH = Path("output/qdrant_db")
-QDRANT_COLLECTION = "doc_chunks"
+QDRANT_COLLECTION = "docs_local"
+
+# Native hybrid search: the collection holds one dense (semantic) vector and one
+# sparse (BM25) vector per point. Fusion combines them with Reciprocal Rank
+# Fusion inside Qdrant.
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "bm25"
+SPARSE_MODEL = "Qdrant/bm25"  # FastEmbed sparse encoder
+HYBRID_PREFETCH_LIMIT = 20    # candidates pulled per signal before fusion
 
 # Model settings
 # DEFAULT_MODEL stays Gemini-only: it powers external_search_node, which relies

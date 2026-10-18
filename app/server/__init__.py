@@ -1,0 +1,1 @@
+"""HTTP API surface (FastAPI) exposing the shared capabilities."""

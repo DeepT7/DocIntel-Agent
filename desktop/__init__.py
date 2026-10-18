@@ -1,0 +1,1 @@
+"""Desktop surfaces: one process, two windows (Main + Quick)."""

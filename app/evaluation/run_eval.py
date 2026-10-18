@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.retrieval.retrieve import vector_search, hybrid_search
+from app.retrieval.retrieve import vector_search, dense_search
 from app.core.config import DEFAULT_TOP_K
 from app.core.tracing import (
     observe as _observe,
@@ -14,8 +14,8 @@ from app.core.tracing import (
 )
 
 RETRIEVERS = {
-    "vector": vector_search,
-    "hybrid": hybrid_search,
+    "dense": dense_search,
+    "hybrid": vector_search,
 }
 
 CACHE_PATH = Path("output/eval_cache.json")

@@ -1,171 +1,305 @@
-﻿import re
-import json
-import atexit
+﻿"""Retrieval over the local Qdrant collection.
 
-from qdrant_client import QdrantClient
-from rank_bm25 import BM25Okapi
+The collection stores two vectors per point:
+
+- ``dense``: the semantic embedding (OpenRouter/Gemini model).
+- ``bm25``: a sparse BM25 vector (FastEmbed), scored with Qdrant's IDF modifier.
+
+``vector_search`` fuses the two with Qdrant's native Reciprocal Rank Fusion via
+the Query API (``prefetch`` + ``Fusion.RRF``). ``dense_search`` exposes the
+semantic signal alone, which is useful for comparison.
+"""
+
+import json
+import re
+
+from qdrant_client.http import models
+
 from app.core.config import (
     DEFAULT_TOP_K,
-    QDRANT_PATH,
+    DENSE_VECTOR_NAME,
+    HYBRID_PREFETCH_LIMIT,
     QDRANT_COLLECTION,
+    SPARSE_MODEL,
+    SPARSE_VECTOR_NAME,
 )
-from app.core.models import RetrievedChunk
-from app.retrieval.embed_chunks import embed_texts
+from app.core.scope import normalize_root
+from app.retrieval.embeddings import embed_texts
+from app.retrieval.store import get_client
 
-qdrant = QdrantClient(path=str(QDRANT_PATH))
+# Resolved lazily at query time: importing this module (e.g. for `answer._generate`
+# or the intent router) must not open the embedded DB and take its single-process
+# lock. `get_client()` returns the shared, cached instance.
 COLLECTION_NAME = QDRANT_COLLECTION
 
-# Close the local Qdrant client before interpreter shutdown. Otherwise
-# QdrantClient.__del__ runs once sys.meta_path is gone and prints a spurious
-# "ImportError: sys.meta_path is None, Python is likely shutting down".
-atexit.register(qdrant.close)
 
-# In-memory BM25 index built lazily from the stored Qdrant chunks.
-_BM25_INDEX = None
-_BM25_META: list = []
+def _path_condition(paths: "str | list[str] | None"):
+    """Build a payload condition matching one or many document paths."""
+    if not paths:
+        return None
+    if isinstance(paths, str):
+        paths = [paths]
+    paths = [p for p in dict.fromkeys(paths) if p]
+    if not paths:
+        return None
+    if len(paths) == 1:
+        return models.FieldCondition(key="path", match=models.MatchValue(value=paths[0]))
+    return models.FieldCondition(key="path", match=models.MatchAny(any=paths))
 
 
-def _tokenize(text: str) -> list:
-    return re.findall(r"[a-z0-9]+", (text or "").lower())
+def _scope_filter(scope: str | None, paths: "str | list[str] | None" = None):
+    """Restrict a query to one folder root and/or a set of documents.
 
-
-def _build_bm25_index():
-    """Scroll every stored chunk from Qdrant and build a BM25 index over its text."""
-    points = []
-    offset = None
-    while True:
-        batch, offset = qdrant.scroll(
-            collection_name=COLLECTION_NAME,
-            limit=256,
-            offset=offset,
-            with_payload=True,
-            with_vectors=False,
+    ``scope`` filters on the folder root; ``paths`` narrows to one or many
+    documents (the relative path stored in the payload). Returns ``None`` when
+    neither is set, meaning "search everything".
+    """
+    must = []
+    if scope:
+        must.append(
+            models.FieldCondition(
+                key="root", match=models.MatchValue(value=normalize_root(scope))
+            )
         )
-        points.extend(batch)
-        if offset is None:
-            break
-
-    corpus = []
-    meta = []
-    for point in points:
-        payload = point.payload or {}
-        corpus.append(_tokenize(payload.get("text", "")))
-        meta.append(payload)
-
-    return BM25Okapi(corpus), meta
+    path_cond = _path_condition(paths)
+    if path_cond is not None:
+        must.append(path_cond)
+    return models.Filter(must=must) if must else None
 
 
-def _get_bm25_index():
-    global _BM25_INDEX, _BM25_META
-    if _BM25_INDEX is None:
-        _BM25_INDEX, _BM25_META = _build_bm25_index()
-    return _BM25_INDEX, _BM25_META
+# Bibliography-like sections rank high for short queries but are rarely the
+# answer. We do NOT drop them (a user may ask about the references themselves);
+# we only down-weight them. Detection combines a heading hint with a
+# language-independent "citation density" signal so it generalizes beyond
+# English/AI papers.
+_REFERENCE_HEADING_RE = re.compile(
+    r"\b(references|bibliography|works\s+cited|acknowledg|tài\s+liệu\s+tham\s+khảo)",
+    re.IGNORECASE,
+)
+_CITATION_RE = re.compile(
+    r"(\(?\b(?:19|20)\d{2}\b\)?|\bet\s+al\b|https?://|\bdoi\b|\bpp\.\s*\d|\bvol\.\s*\d)",
+    re.IGNORECASE,
+)
+
+
+def _is_reference_like(payload: dict) -> bool:
+    heading = payload.get("section_title_clean") or payload.get("section_heading") or ""
+    if _REFERENCE_HEADING_RE.search(heading):
+        return True
+    text = payload.get("text") or ""
+    if len(text) < 200:
+        return False
+    # ~2+ citation markers per 500 characters => bibliography-like.
+    density = len(_CITATION_RE.findall(text)) / (len(text) / 500)
+    return density >= 2.0
+
+
+def _to_result(payload: dict, score: float, semantic: float, keyword: float) -> dict:
+    return {
+        "score": score,
+        "semantic_score": semantic,
+        "keyword_score": keyword,
+        "chunk_id": payload.get("chunk_id"),
+        "file_id": payload.get("file_id"),
+        "doc_type": payload.get("doc_type"),
+        "root": payload.get("root"),
+        "path": payload.get("path"),
+        "url": payload.get("url"),
+        "title": payload.get("title"),
+        "file_name": payload.get("file_name"),
+        "breadcrumbs": payload.get("breadcrumbs", []),
+        "section_heading": payload.get("section_heading"),
+        "section_level": payload.get("section_level", 1),
+        "section_depth": payload.get("section_depth", 1),
+        "breadcrumb_levels": payload.get("breadcrumb_levels", []),
+        "section_id": payload.get("section_id"),
+        "section_ancestors": payload.get("section_ancestors", []),
+        "section_titles": payload.get("section_titles", []),
+        "section_depths": payload.get("section_depths", []),
+        "section_numbers": payload.get("section_numbers", []),
+        "section_title_clean": payload.get("section_title_clean"),
+        "section_number": payload.get("section_number", ""),
+        "raw_heading": payload.get("raw_heading"),
+        "chunk_type": payload.get("chunk_type", "text"),
+        "context_header": payload.get("context_header"),
+        "char_count": payload.get("char_count", 0),
+        "text": payload.get("text"),
+        "caption": payload.get("caption"),
+        "table_number": payload.get("table_number"),
+    }
+
+
+def dense_search(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    scope: str | None = None,
+    paths: "str | list[str] | None" = None,
+) -> list[dict]:
+    """Pure semantic search (dense vectors only)."""
+    query = query.strip()
+    if not query:
+        return []
+
+    query_embedding = embed_query(query)
+    hits = get_client().query_points(
+        collection_name=COLLECTION_NAME,
+        query=query_embedding,
+        using=DENSE_VECTOR_NAME,
+        limit=top_k,
+        query_filter=_scope_filter(scope, paths),
+    ).points
+
+    return [_to_result(hit.payload or {}, hit.score, hit.score, 0.0) for hit in hits]
 
 
 def vector_search(
-        query: str,
-        top_k: int = DEFAULT_TOP_K,
-) -> list[RetrievedChunk]:
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    scope: str | None = None,
+    paths: "str | list[str] | None" = None,
+) -> list[dict]:
+    """Native hybrid search: dense + sparse BM25 fused with RRF inside Qdrant.
+
+    ``scope`` restricts results to one folder root (payload field ``root``);
+    ``paths`` further restricts to one or many documents.
+    """
     query = query.strip()
     if not query:
         return []
 
+    qfilter = _scope_filter(scope, paths)
     query_embedding = embed_query(query)
+    # Qdrant encodes the BM25 query text itself (fastembed), so no helper needed.
+    query_sparse = models.Document(text=query, model=SPARSE_MODEL)
+    # Fetch more than requested so dropping reference sections still leaves top_k.
+    fetch_limit = max(top_k * 3, top_k + 10)
+    prefetch_limit = max(fetch_limit * 2, HYBRID_PREFETCH_LIMIT)
 
-    # Query Qdrant for the top_k most similar chunks
-    search_result = qdrant.query_points(
+    # The fused RRF score is only a rank aggregate, so fetch the dense cosine
+    # separately to keep a calibrated ``semantic_score`` for the relevance gate.
+    dense_hits = get_client().query_points(
         collection_name=COLLECTION_NAME,
         query=query_embedding,
-        limit=top_k,
-    )
+        using=DENSE_VECTOR_NAME,
+        limit=prefetch_limit,
+        query_filter=qfilter,
+    ).points
+    semantic_by_id = {
+        (hit.payload or {}).get("chunk_id"): hit.score for hit in dense_hits
+    }
 
-    # Format the results into RetrievedChunk objects
-    results = []
-    for hit in search_result.points:
+    fused = get_client().query_points(
+        collection_name=COLLECTION_NAME,
+        prefetch=[
+            models.Prefetch(
+                query=query_embedding,
+                using=DENSE_VECTOR_NAME,
+                limit=prefetch_limit,
+                filter=qfilter,
+            ),
+            models.Prefetch(
+                query=query_sparse,
+                using=SPARSE_VECTOR_NAME,
+                limit=prefetch_limit,
+                filter=qfilter,
+            ),
+        ],
+        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        limit=fetch_limit,
+        query_filter=qfilter,
+    ).points
+
+    # Down-weight bibliography-like chunks instead of dropping them: they stop
+    # crowding the top for content queries, yet remain reachable when the query
+    # is genuinely about references.
+    reference_penalty = 0.4
+    scored = []
+    for hit in fused:
         payload = hit.payload or {}
-        results.append({
-            "score": hit.score,
-            "semantic_score": hit.score,
-            "keyword_score": 0.0,
-            "chunk_id": payload.get("chunk_id"),
-            "file_id": payload.get("file_id"),
-            "doc_type": payload.get("doc_type"),
-            "url": payload.get("url"),
-            "title": payload.get("title"),
-            "breadcrumbs": payload.get("breadcrumbs", []),
-            "section_heading": payload.get("section_heading"),
-            "char_count": payload.get("char_count", 0),
-            "text": payload.get("text"),
-        })
-
-    return results
+        score = hit.score * (reference_penalty if _is_reference_like(payload) else 1.0)
+        chunk_id = payload.get("chunk_id")
+        scored.append((score, payload, semantic_by_id.get(chunk_id, 0.0)))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [_to_result(payload, score, semantic, 0.0) for score, payload, semantic in scored[:top_k]]
 
 
-def hybrid_search(
-        query: str,
-        top_k: int = DEFAULT_TOP_K,
-) -> list[RetrievedChunk]:
-    """Combine dense Qdrant similarity with a BM25 keyword signal via score fusion."""
-    query = query.strip()
-    if not query:
+def section_chunks(
+    scope: str | None,
+    path: str,
+    section_ids: str | list[str],
+    limit: int = 20,
+    include_descendants: bool = False,
+) -> list[dict]:
+    """All indexed chunks of one or more sections, in document order.
+
+    ``section_ids`` are the structural ids stored at ingestion (``s4``,
+    ``s4.1``). With ``include_descendants=True`` the filter is applied to
+    ``section_ancestors``, so a parent id returns its whole subtree (and a child
+    id returns just that branch, including its table chunks). With
+    ``include_descendants=False`` it filters the exact ``section_id`` — used by
+    "small-to-big" expansion to pull a chunk's own section without exploding a
+    parent into every descendant.
+    """
+    ids = [section_ids] if isinstance(section_ids, str) else list(section_ids or [])
+    ids = [section_id for section_id in dict.fromkeys(ids) if section_id]
+    if not path or not ids:
         return []
 
-    query_embedding = embed_query(query)
-    candidate_k = max(top_k * 2, 10)
+    key = "section_ancestors" if include_descendants else "section_id"
+    match = (
+        models.MatchValue(value=ids[0])
+        if len(ids) == 1
+        else models.MatchAny(any=ids)
+    )
+    must = [
+        models.FieldCondition(key="path", match=models.MatchValue(value=path)),
+        models.FieldCondition(key=key, match=match),
+    ]
+    if scope:
+        must.append(
+            models.FieldCondition(
+                key="root", match=models.MatchValue(value=normalize_root(scope))
+            )
+        )
 
-    vector_hits = qdrant.query_points(
+    points, _ = get_client().scroll(
         collection_name=COLLECTION_NAME,
-        query=query_embedding,
-        limit=candidate_k,
+        limit=limit,
+        with_payload=True,
+        with_vectors=False,
+        scroll_filter=models.Filter(must=must),
     )
 
-    bm25, meta = _get_bm25_index()
-    keyword_scores = bm25.get_scores(_tokenize(query))
+    def order(point) -> int:
+        chunk_id = (point.payload or {}).get("chunk_id", "")
+        try:
+            return int(chunk_id.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            return 0
 
-    payload_by_id = {m.get("chunk_id"): m for m in meta}
-    semantic_by_id = {}
-    for hit in vector_hits.points:
-        payload = hit.payload or {}
-        semantic_by_id[payload.get("chunk_id")] = float(hit.score)
+    return [
+        _to_result(point.payload or {}, 0.0, 0.0, 0.0)
+        for point in sorted(points, key=order)
+    ]
 
-    keyword_by_id = {}
-    for idx, score in enumerate(keyword_scores):
-        if score > 0:
-            keyword_by_id[meta[idx].get("chunk_id")] = float(score)
 
-    # Normalize keyword scores to [0, 1] so they fuse on the same scale as cosine.
-    max_keyword = max(keyword_by_id.values(), default=0.0)
-    if max_keyword > 0:
-        keyword_by_id = {pid: s / max_keyword for pid, s in keyword_by_id.items()}
+def document_outline(scope: str | None, path: str) -> dict:
+    """A document's title and canonical section tree, in reading order.
 
-    # Weighted fusion of the normalized signals.
-    fused = {}
-    for pid in set(semantic_by_id) | set(keyword_by_id):
-        semantic = semantic_by_id.get(pid, 0.0)
-        keyword = keyword_by_id.get(pid, 0.0)
-        fused[pid] = 0.7 * semantic + 0.3 * keyword
+    The tree lives in the Document Card, which is RAM-cached, so the normal turn
+    does not scroll Qdrant. ``ensure_outline`` is the one-time migration path for
+    cards created before the canonical tree existed.
+    """
+    if not path:
+        return {"title": path, "sections": [], "tree": []}
 
-    ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+    from app.capabilities.registry import ensure_outline
+    from app.core.sections import flatten_sections
 
-    results = []
-    for pid, score in ranked:
-        payload = payload_by_id.get(pid, {})
-        results.append({
-            "score": score,
-            "semantic_score": semantic_by_id.get(pid, 0.0),
-            "keyword_score": keyword_by_id.get(pid, 0.0),
-            "chunk_id": payload.get("chunk_id"),
-            "file_id": payload.get("file_id"),
-            "doc_type": payload.get("doc_type"),
-            "url": payload.get("url"),
-            "title": payload.get("title"),
-            "breadcrumbs": payload.get("breadcrumbs", []),
-            "section_heading": payload.get("section_heading"),
-            "char_count": payload.get("char_count", 0),
-            "text": payload.get("text"),
-        })
-
-    return results
+    card = ensure_outline(scope, path) if scope else {}
+    tree = card.get("outline_tree") or []
+    sections = [item["title"] for item in flatten_sections(tree) if item.get("title")]
+    return {"title": card.get("title") or path, "sections": sections, "tree": tree}
 
 
 def embed_query(query: str) -> list[float]:

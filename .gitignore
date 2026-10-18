@@ -16,6 +16,7 @@ data/chunks/
 data/embeddings/
 data/graph/
 data/samples/
+data/index/
 
 # Tooling / agent config (not part of the project)
 .agents/

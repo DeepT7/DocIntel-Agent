@@ -5,19 +5,86 @@ from google import genai
 from google.genai import types
 from langgraph.graph import StateGraph, START, END
 
+from app.capabilities.workspace import list_files
 from app.core.models import ExternalSource, RAGState
-from app.reasoning.answer import condense_question, format_context, generate_answer, grade_documents, rewrite_query
+from app.core.prompts import build_chat_prompt, build_workspace_prompt
+from app.reasoning.answer import (
+    _generate,
+    classify_intent,
+    condense_question,
+    format_context,
+    format_history,
+    generate_answer,
+    grade_documents,
+    resolve_section,
+    rewrite_query,
+)
 from app.core.config import DEFAULT_MODEL, DEFAULT_TOP_K
-from app.retrieval.retrieve import hybrid_search, vector_search
+from app.core.sections import flatten_sections
+from app.retrieval.retrieve import document_outline, section_chunks, vector_search
 from app.core.tracing import observe, update_current_span, set_trace_io, trace_context, flush_traces
 from app.core.text import clean_text
 
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
-if not api_key:
-    raise RuntimeError("Set GEMINI_API_KEY or API_KEY before running rag_graph.py.")
-client = genai.Client(api_key=api_key)
+# Section resolution is one fast model call per focused document. Cap the number
+# of documents so a wide comparison cannot turn into an unbounded LLM fan-out.
+MAX_SECTION_DOCS = 3
+# Total chunks pulled from resolved sections across all documents.
+MAX_SECTION_CHUNKS = 24
+
+_client = None
+
+
+def _get_client():
+    """Lazily build the Gemini client.
+
+    Only ``external_search_node`` needs Gemini, and it is disabled by default for
+    local-first folder Q&A. Importing this module must not require a Gemini key.
+    """
+    global _client
+    if _client is None:
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("API_KEY")
+        if not api_key:
+            return None
+        _client = genai.Client(api_key=api_key)
+    return _client
+
+@observe("classify_node", capture_output=False)
+def classify_node(state: RAGState) -> dict:
+    """Route the turn: chat / followup / question.
+
+    If the caller already classified (the server needs the label to choose the
+    document scope), reuse it instead of paying for a second model call.
+    """
+    intent = state.get("intent")
+    if intent not in ("chat", "followup", "question", "workspace"):
+        intent = classify_intent(state["query"], state.get("chat_history"))
+    update_current_span(intent=intent, query=state["query"])
+    return {"intent": intent}
+
+
+@observe("chat_node", capture_output=False)
+def chat_node(state: RAGState) -> dict:
+    """Reply to greetings/meta without touching the index."""
+    query = state["query"]
+    history = state.get("chat_history", []) or []
+    prompt = build_chat_prompt(query, format_history(history))
+    answer = _generate(prompt, max_tokens=200)
+    update_current_span(output=answer, intent="chat")
+    return {"context": "", "answer": answer, "sources": [], "intent": "chat"}
+
+
+@observe("workspace_node", capture_output=False)
+def workspace_node(state: RAGState) -> dict:
+    """Answer questions about the workspace itself (list files, counts)."""
+    scope = state.get("scope")
+    files = list_files(scope) if scope else []
+    prompt = build_workspace_prompt(scope or "", files, state["query"])
+    answer = _generate(prompt, max_tokens=800)
+    update_current_span(output=answer, intent="workspace", num_files=len(files))
+    return {"context": "", "answer": answer, "sources": [], "intent": "workspace"}
+
 
 @observe("condense_node", capture_output=False)
 def condense_node(state: RAGState) -> dict:
@@ -37,32 +104,160 @@ def condense_node(state: RAGState) -> dict:
 @observe("retrieve_node", as_type="retriever")
 def retrieve_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    # results = hybrid_search(query, top_k=DEFAULT_TOP_K)
-    results = vector_search(query, top_k=DEFAULT_TOP_K)
+    scope = state.get("scope")
+    doc_paths = state.get("doc_paths")
+    top_k = state.get("top_k") or DEFAULT_TOP_K
+
+    # Canonical section filter: resolve structural ids per focused document. The
+    # tree comes from the RAM-cached Document Card, so this adds one utility LLM
+    # call per document (capped) but no Qdrant scroll. A parent id returns its
+    # whole subtree; table chunks share their section's id.
+    section_locks: dict[str, list[str]] = {}
+    locked_chunk_ids: set[str] = set()
+    results: list[dict] = []
+    focus_paths = doc_paths[:MAX_SECTION_DOCS] if doc_paths else []
+    if focus_paths:
+        # Reserve room for vector retrieval when there are documents beyond the
+        # section-resolution cap, then split the rest evenly across focused docs.
+        # A wide comparison must not let the first huge chapter consume every
+        # context slot.
+        section_cap = MAX_SECTION_CHUNKS
+        if doc_paths and len(doc_paths) > MAX_SECTION_DOCS:
+            section_cap = max(MAX_SECTION_CHUNKS - top_k, 6)
+        per_doc_budget = max(4, section_cap // len(focus_paths))
+        for path in focus_paths:
+            outline = document_outline(scope, path)
+            sections = flatten_sections(outline.get("tree") or [])
+            section_ids = resolve_section(
+                query, outline.get("title") or path, sections
+            )
+            if not section_ids:
+                continue
+            chunks = section_chunks(
+                scope,
+                path,
+                section_ids,
+                limit=section_cap,
+                include_descendants=True,
+            )
+            if not chunks:
+                continue
+            section_locks[path] = section_ids
+            added = 0
+            for chunk in chunks:
+                chunk_id = chunk.get("chunk_id")
+                if chunk_id and chunk_id in locked_chunk_ids:
+                    continue
+                if chunk_id:
+                    locked_chunk_ids.add(chunk_id)
+                results.append(chunk)
+                added += 1
+                if added >= per_doc_budget or len(results) >= MAX_SECTION_CHUNKS:
+                    break
+
+    # Documents without a resolved section (or beyond the cap) keep vector
+    # retrieval. A whole-folder question (doc_paths=None) never section-locks.
+    unlocked_paths = (
+        [path for path in doc_paths if path not in section_locks]
+        if doc_paths
+        else None
+    )
+    need_vector = not doc_paths or bool(unlocked_paths)
+    if need_vector and len(results) < MAX_SECTION_CHUNKS:
+        # Router sub-queries: run each, then merge (dedup by chunk_id). This is
+        # the "decompose a comparison into per-side queries" step.
+        queries = state.get("queries") or []
+        if len(queries) > 1:
+            merged: list[dict] = []
+            seen: set[str] = set(locked_chunk_ids)
+            for sub_query in queries:
+                for chunk in vector_search(
+                    sub_query, top_k=top_k, scope=scope, paths=unlocked_paths
+                ):
+                    chunk_id = chunk.get("chunk_id")
+                    if chunk_id and chunk_id in seen:
+                        continue
+                    if chunk_id:
+                        seen.add(chunk_id)
+                    merged.append(chunk)
+            vector_results = merged[: top_k * len(queries)]
+        else:
+            vector_results = vector_search(
+                query, top_k=top_k, scope=scope, paths=unlocked_paths
+            )
+
+        seen = set(locked_chunk_ids)
+        for chunk in vector_results:
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id and chunk_id in seen:
+                continue
+            if chunk_id:
+                seen.add(chunk_id)
+            results.append(chunk)
+            if len(results) >= MAX_SECTION_CHUNKS:
+                break
+
     update_current_span(
         output=[
             {"chunk_id": r.get("chunk_id"), "title": r.get("title"), "score": round(r.get("score", 0.0), 4)}
             for r in results
         ],
         query=query,
+        scope=scope,
+        doc_paths=doc_paths,
         num_chunks=len(results),
+        section_locks=section_locks,
     )
     return {
         "retrieved_chunks": results,
+        "section_locks": section_locks,
+        "section_locked_chunk_ids": sorted(locked_chunk_ids),
     }
 
 @observe("grade_node", capture_output=False)
 def grade_node(state: RAGState) -> dict:
-    query = state.get("standalone_query") or state["query"]
     chunks = state.get("retrieved_chunks", [])
-    top_score = chunks[0].get("score", 0.0) if chunks else 0.0
+    locked_ids = set(state.get("section_locked_chunk_ids") or [])
+    locked = [chunk for chunk in chunks if chunk.get("chunk_id") in locked_ids]
+    unlocked = [chunk for chunk in chunks if chunk.get("chunk_id") not in locked_ids]
+
+    # Chunks from a resolved section are exactly what the user asked for; grade
+    # only the vector-retrieved remainder. This makes mixed multi-document turns
+    # (one document section-locked, another not) correct.
+    if not unlocked:
+        update_current_span(
+            num_chunks=len(chunks),
+            num_relevant=len(chunks),
+            gated=True,
+            section_locks=state.get("section_locks"),
+        )
+        return {"relevant_chunks": chunks, "graded_ok": bool(chunks)}
+
+    query = state.get("standalone_query") or state["query"]
+    # ``score`` is the fused RRF value; gate on the dense cosine when available.
+    top_score = max(
+        (
+            chunk.get("semantic_score") or chunk.get("score", 0.0)
+            for chunk in unlocked
+        ),
+        default=0.0,
+    )
     # Skip the (slow) LLM grading call when retrieval is already confident.
     if top_score >= 0.5:
-        update_current_span(num_chunks=len(chunks), num_relevant=len(chunks), gated=True)
-        return {"relevant_chunks": chunks, "graded_ok": bool(chunks)}
-    indices = grade_documents(query, chunks)
-    relevant = [chunks[i] for i in indices] if chunks else []
-    update_current_span(num_chunks=len(chunks), num_relevant=len(relevant), gated=False)
+        graded = unlocked
+        gated = True
+    else:
+        indices = grade_documents(query, unlocked)
+        graded = [unlocked[i] for i in indices]
+        gated = False
+    relevant = locked + graded
+    update_current_span(
+        num_chunks=len(chunks),
+        num_relevant=len(relevant),
+        gated=gated,
+        locked=len(locked),
+        section_locks=state.get("section_locks"),
+    )
     return {"relevant_chunks": relevant, "graded_ok": bool(relevant)}
     
 
@@ -78,20 +273,72 @@ def route_after_grade(state: RAGState):
         return "answer"
     if state.get("rewrite_count", 0) < 1: # Permitted to rewrite one time
         return "rewrite"
+    # Local-first default: do not silently send the query to the web.
+    if not state.get("allow_external", True):
+        return "fallback"
     return "external_search"
+
+def _expand_to_sections(
+    chunks: list[dict],
+    scope: str | None,
+    per_section: int = 4,
+    max_chunks: int = 16,
+) -> list[dict]:
+    """Small-to-big: widen each retrieved chunk to its whole section.
+
+    A section is often split across several chunks; the fact the user asked for
+    can sit in a sibling chunk that scored slightly lower. Adding those siblings
+    to the context lets the answer use the full section instead of a fragment.
+    """
+    expanded: list[dict] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        chunk_id = chunk.get("chunk_id")
+        if chunk_id and chunk_id in seen:
+            continue
+        if chunk_id:
+            seen.add(chunk_id)
+        expanded.append(chunk)
+        if len(expanded) >= max_chunks:
+            break
+
+        path = chunk.get("path")
+        section_id = chunk.get("section_id")
+        if not path or not section_id:
+            continue
+        added = 0
+        for sibling in section_chunks(
+            scope,
+            path,
+            [section_id],
+            limit=per_section + 1,
+            include_descendants=False,
+        ):
+            sid = sibling.get("chunk_id")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            expanded.append(sibling)
+            added += 1
+            if added >= per_section or len(expanded) >= max_chunks:
+                break
+
+    return expanded[:max_chunks]
+
 
 @observe("answer_node", capture_output=False)
 def answer_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
     retrieved_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
-    context = format_context(retrieved_chunks)
+    sources = _expand_to_sections(retrieved_chunks, state.get("scope"))
+    context = format_context(sources)
     answer = generate_answer(query, context)
-    update_current_span(output=answer, num_sources=len(retrieved_chunks), answer_chars=len(answer))
+    update_current_span(output=answer, num_sources=len(sources), answer_chars=len(answer))
 
     return {
         "context": context,
         "answer": answer,
-        "sources": retrieved_chunks,
+        "sources": sources,
     }
 
 def _extract_external_sources(response) -> list[ExternalSource]:
@@ -153,6 +400,16 @@ def external_search_node(state: RAGState) -> dict:
             "external_sources": [],
         }
 
+    client = _get_client()
+    if client is None:
+        update_current_span(output=None, reason="no Gemini key")
+        return {
+            "external_ok": False,
+            "external_reason": "External search unavailable (no Gemini key).",
+            "external_context": "",
+            "external_sources": [],
+        }
+
     grounding_tool = types.Tool(google_search=types.GoogleSearch())
     response = client.models.generate_content(
         model=DEFAULT_MODEL,
@@ -188,7 +445,8 @@ def external_search_node(state: RAGState) -> dict:
 @observe("answer_with_fallback_node", capture_output=False)
 def answer_with_fallback_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    internal_chunks = state.get("relevant_chunks") or  state.get("retrieved_chunks", [])
+    internal_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
+    internal_chunks = _expand_to_sections(internal_chunks, state.get("scope"))
     internal_context = format_context(internal_chunks) if internal_chunks else ""
     external_context = state.get("external_context", "").strip()
 
@@ -228,6 +486,9 @@ def route_after_external_search(state: RAGState) -> str:
     return "fallback"
 
 builder = StateGraph(RAGState)
+builder.add_node("classify", classify_node)
+builder.add_node("chat", chat_node)
+builder.add_node("workspace", workspace_node)
 builder.add_node("condense", condense_node)
 builder.add_node("retrieve", retrieve_node)
 builder.add_node("answer", answer_node)
@@ -237,11 +498,22 @@ builder.add_node("external_search", external_search_node)
 builder.add_node("answer_with_fallback", answer_with_fallback_node)
 builder.add_node("fallback", fallback_node)
 
-builder.add_edge(START, "condense")
+builder.add_edge(START, "classify")
+# chat -> no retrieval; followup -> rewrite to standalone then retrieve;
+# question -> already standalone, retrieve directly (no condense).
+builder.add_conditional_edges(
+    "classify",
+    lambda state: state.get("intent", "question"),
+    {"chat": "chat", "workspace": "workspace",
+     "followup": "condense", "question": "retrieve"},
+)
+builder.add_edge("chat", END)
+builder.add_edge("workspace", END)
 builder.add_edge("condense", "retrieve")
 builder.add_edge("retrieve", "grade")
 builder.add_conditional_edges("grade", route_after_grade,
-                              {"answer": "answer", "rewrite": "rewrite", "external_search": "external_search"})
+                              {"answer": "answer", "rewrite": "rewrite",
+                               "external_search": "external_search", "fallback": "fallback"})
 builder.add_edge("rewrite", "retrieve")
 builder.add_conditional_edges("external_search", route_after_external_search,
                              {
@@ -255,15 +527,35 @@ builder.add_edge("fallback", END)
 graph = builder.compile()
 
 @observe("run_rag", capture_input=False, capture_output=False)
-def run_rag(query: str, chat_history: list[dict] | None = None) -> RAGState:
+def run_rag(
+    query: str,
+    chat_history: list[dict] | None = None,
+    scope: str | None = None,
+    doc_paths: list[str] | None = None,
+    top_k: int | None = None,
+    allow_external: bool = True,
+    intent: str | None = None,
+    queries: list[str] | None = None,
+) -> RAGState:
     query = clean_text(query)
     history = chat_history or []
     with trace_context(
         trace_name="run_rag",
         tags=["rag"],
-        metadata={"query": query, "turns": len(history) // 2},
+        metadata={"query": query, "turns": len(history) // 2, "scope": scope, "doc_paths": doc_paths},
     ):
-        result = graph.invoke({"query": query, "chat_history": history})
+        result = graph.invoke(
+            {
+                "query": query,
+                "chat_history": history,
+                "scope": scope,
+                "doc_paths": doc_paths,
+                "top_k": top_k,
+                "allow_external": allow_external,
+                "intent": intent,
+                "queries": queries or [],
+            }
+        )
     answer = result.get("answer", "")
     update_current_span(output=answer, query=query, num_sources=len(result.get("sources", [])))
     set_trace_io(input=query, output=answer)
@@ -338,7 +630,7 @@ def run_cli() -> None:
                 table.add_row(
                     str(index),
                     source.get("title", ""),
-                    source.get("section_heading", ""),
+                    source.get("section_title_clean") or source.get("section_heading", ""),
                     source.get("url", ""),
                 )
             console.print(table)

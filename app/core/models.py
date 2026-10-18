@@ -1,39 +1,6 @@
 from typing import TypedDict, NotRequired
 
 
-class ChunkRecord(TypedDict):
-    chunk_id: str
-    file_id: str
-    url: str
-    title: str
-    source_domain: str
-    doc_type: str
-    breadcrumbs: list[str]
-    section_heading: str
-    section_anchor: str
-    section_role: str
-    priority_band: str
-    importance_score: float
-    reasons: list[str]
-    text: str
-    char_count: int
-
-
-class EmbeddingRecord(TypedDict):
-    chunk_id: str
-    file_id: str
-    url: str
-    title: str
-    doc_type: str
-    breadcrumbs: list[str]
-    section_heading: str
-    char_count: int
-    model: str
-    embedded_at: str
-    text: str
-    embedding: list[float]
-
-
 class RetrievedChunk(TypedDict):
     score: float
     chunk_id: str
@@ -43,6 +10,14 @@ class RetrievedChunk(TypedDict):
     title: str
     breadcrumbs: list[str]
     section_heading: str
+    section_id: str
+    section_ancestors: list[str]
+    section_titles: list[str]
+    section_depths: list[int]
+    section_title_clean: str
+    section_number: str
+    chunk_type: str
+    raw_heading: str
     char_count: int
     text: str
 
@@ -66,8 +41,18 @@ class AnswerResult(TypedDict):
 
 class RAGState(TypedDict):
     query: str
+    scope: NotRequired[str]
+    doc_paths: NotRequired[list[str]]
+    top_k: NotRequired[int]
+    allow_external: NotRequired[bool]
     chat_history: NotRequired[list[dict]]
+    intent: NotRequired[str]  # "chat" (small talk / meta) or "question"
     standalone_query: NotRequired[str]
+    # path -> canonical section ids resolved by the self-query. A parent id
+    # expands to its subtree in section_chunks.
+    section_locks: NotRequired[dict[str, list[str]]]
+    section_locked_chunk_ids: NotRequired[list[str]]
+    queries: NotRequired[list[str]]  # router's sub-queries (multi-query retrieval)
     retrieved_chunks: NotRequired[list[RetrievedChunk]]
     relevant_chunks: NotRequired[list[RetrievedChunk]]
     graded_ok: NotRequired[bool]
