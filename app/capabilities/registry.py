@@ -9,9 +9,9 @@ indexing and cached by content hash.
 The outline is stored twice:
 
 * ``outline_tree``: the canonical nested section tree, read by the resolver.
-  Each node has a structural id (``s4``, ``s4.1``), its clean title, its depth
-  and its children. Chat reads this from the RAM-cached card, so it does **not**
-  scroll Qdrant on every turn.
+  Each node has a materialized-path id (``s4``, ``s4.1``; structural fallbacks
+  are ``x1``/``s4.x1``), its clean title, its depth and its children. Chat reads
+  this from the RAM-cached card, so it does **not** scroll Qdrant on every turn.
 * ``sections``: the same tree rendered as compact text for the UI and the card
   prompt.
 
@@ -28,11 +28,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.capabilities.insights import _file_chunks
-from app.core.config import INDEX_DIR
+from app.core.config import (
+    CACHE_HASH_LEN,
+    CARD_MAX_KEYWORDS,
+    CARD_SINGLE_PASS_CHARS,
+    INDEX_DIR,
+    MAX_TOKENS,
+    OUTLINE_VERSION,
+)
 from app.core.prompts import build_document_card_prompt
 from app.core.scope import normalize_root
 from app.core.sections import (
-    OUTLINE_VERSION,
     build_section_tree,
     render_outline,
 )
@@ -41,7 +47,7 @@ from app.reasoning.answer import _generate
 
 REGISTRY_DIR = INDEX_DIR / "registry"
 # Only this much text feeds the card prompt (cards summarize, they don't index).
-SINGLE_PASS_CHARS = 14000
+SINGLE_PASS_CHARS = CARD_SINGLE_PASS_CHARS
 
 # RAM cache keyed by the registry file's mtime. Chat reads a card on every turn,
 # so re-reading and re-parsing the JSON each time is wasted work.
@@ -49,7 +55,7 @@ _CACHE: dict[str, tuple[int, dict]] = {}
 
 
 def _registry_path(root: str) -> Path:
-    key = hashlib.md5(root.encode("utf-8")).hexdigest()[:8]
+    key = hashlib.md5(root.encode("utf-8")).hexdigest()[:CACHE_HASH_LEN]
     return REGISTRY_DIR / f"{key}.json"
 
 
@@ -98,7 +104,7 @@ def _parse_card(raw: str) -> dict:
     return {
         "title": str(data.get("title") or "").strip(),
         "summary": str(data.get("summary") or "").strip(),
-        "keywords": [str(k).strip() for k in keywords if str(k).strip()][:15],
+        "keywords": [str(k).strip() for k in keywords if str(k).strip()][:CARD_MAX_KEYWORDS],
     }
 
 
@@ -166,7 +172,7 @@ def build_card(scope: str, rel_path: str, force: bool = False) -> dict:
     parsed = _parse_card(
         _generate(
             build_document_card_prompt(abs_path.name, full_text[:SINGLE_PASS_CHARS]),
-            max_tokens=700,
+            max_tokens=MAX_TOKENS["document_card"],
         )
     )
     record = dict(cached or {})

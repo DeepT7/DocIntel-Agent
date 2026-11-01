@@ -114,7 +114,7 @@ desktop/ui/*.html            Quick/Main native (tuỳ chọn)
 | POST | `/api/registry` | `{scope?, force?}` | dựng thẻ còn thiếu (background job) → `{job_id}` |
 | POST | `/api/search` | `{query, scope?, path?, paths?, top_k}` | hits (có `score`, `semantic_score`, `path`, `section_heading`) |
 | POST | `/api/suggest` | `{query, clipboard, scope?}` | `{suggestion, sources}` |
-| POST | `/api/ask` | `{query, scope?, conversation_id?, path?, paths?, top_k?, history?, use_session?, use_selection?, notes?, allow_external?, save?}` | `{answer, intent, scope_mode, conversation_id, standalone_query, sources, scope, doc_paths, routed_queries}` |
+| POST | `/api/ask` | `{query, scope?, conversation_id?, path?, paths?, top_k?, history?, use_session?, use_selection?, notes?, allow_external?, thinking?, save?}` | `{answer, intent, scope_mode, conversation_id, standalone_query, sources, scope, doc_paths, routed_queries}` |
 | GET | `/api/session` | `?conversation_id=` | lịch sử hội thoại (`[{role,content}]`) |
 | POST | `/api/session/clear` | `{conversation_id?}` | `{session: []}` |
 | POST | `/api/conversation/new` | — | `{conversation_id}` (chat mới, rỗng) |
@@ -268,17 +268,22 @@ Chỉ mở **một** tiến trình dùng Qdrant tại một thời điểm.
   `scope_mode`/`resolve_scope` → `None`. Đã gỡ hẳn `_detect_docs`, `_DOC_*`,
   `_COMPARATIVE_WORDS`, `_has_contiguous_run`, `_quoted_spans`.
 - **Câu hỏi cấu trúc (Canonical Section Tree + Self-Querying)**:
-  (1) Ingestion sinh **materialized path** cho từng heading: `section_id` (`s1`, `s1.1`),
-  `section_ancestors` (gồm chính nó), `section_titles`, `section_depths`. ID là **cấu trúc**,
-  không phụ thuộc text, nên heading trùng tên / không đánh số vẫn tách biệt; bảng dùng
-  **cùng `section_id`** với mục chứa nó (chỉ khác `chunk_type=table`).
+  (1) Ingestion sinh **materialized path** cho từng heading: `section_id` (`s4`, `s4.1`),
+  `section_ancestors` (gồm chính nó), `section_titles`, `section_depths`. ID giữ **số mục
+  in trên tài liệu** khi nhất quán với cha (`4` → `s4`, `4.1` → `s4.1`); heading không đánh
+  số / list item dưới wrapper khác dùng fallback cấu trúc (`x1`, `s4.x1`, `sF.x1`), trùng
+  đường dẫn thì thêm `-2`. Nhờ vậy ID vừa trực quan vừa unique; bảng dùng **cùng
+  `section_id`** với mục chứa nó (chỉ khác `chunk_type=table`).
   (2) Thẻ lưu `outline_tree`; `document_outline` đọc từ **RAM cache**, không scroll Qdrant.
   (3) Khi có `doc_paths`, resolver chạy **per-document** (tối đa 3 tài liệu/lượt):
   `resolve_section` trả **danh sách `section_id`** (JSON), có thể là mục cha hoặc nhiều mục
   ("so sánh mục 3 và 4"). Một **deterministic gate** (`_looks_like_section_query`) chỉ gọi
-  resolver khi query thật sự chỉ mục (có "section/mục/chương", số dạng `4.1`, hoặc khớp
-  tiêu đề nhiều từ); câu hỏi nội dung chung như "what datasets did they build?" **không**
-  bị khoá mục.
+  resolver khi query thật sự chỉ mục. Tín hiệu chính **độc lập ngôn ngữ**: số mục dạng
+  `4.1`/`A.1`, số trần khớp `section_number` của tài liệu (`chapitre 4`, `Abschnitt 4`,
+  `第4章`, `4장`), hoặc khớp title nhiều từ. Từ khóa `section/mục/chương` chỉ là accelerator.
+  Resolver trả thêm `is_section_request`; số dùng làm **đơn vị / version / ngày / %** như
+  `5.2 seconds`, `version 2.0`, `12%`, hay `cross-section` → `false` và **không lock**.
+  Câu hỏi nội dung chung như "what datasets did they build?" cũng **không** bị khoá mục.
   (4) `section_chunks` lọc `section_ancestors` bằng `MatchAny`:
   - mục con → đúng nhánh đó (kèm bảng);
   - mục cha → **toàn bộ cây con**, kể cả mục cha không có text trực tiếp (trước đây trả 0);
@@ -304,7 +309,14 @@ Chỉ mở **một** tiến trình dùng Qdrant tại một thời điểm.
 
 ## 12. Việc tiếp theo (đề xuất)
 
-1. **Embed insight** để search trả về insight (`doc_type=insight`, cite được).
-2. **Transformation-as-data**: task = `{name, prompt, model_id}` → thêm task không cần code.
-3. **Frontend TypeScript (Vite)** gọi API HTTP — thoả yêu cầu TS, vẫn không Qt.
-4. **Đóng gói**: PyInstaller (Windows) cho lõi+API; Quick popup đóng gói riêng.
+1. **IMP-007** — UI chuyển conversation (dropdown/history panel).
+2. **IMP-013** — chặn response cũ render nhầm chat khi bấm New chat giữa request.
+3. **IMP-010** — test/CI cấm `app_state` trong `app/reasoning`, `app/capabilities`,
+   `app/retrieval`.
+4. **IMP-015** — tự chọn tài liệu khi câu hỏi mục toàn folder khớp **đúng một** card.
+5. **IMP-016** — section cha rất dài: chọn top-N theo relevance trong mục thay vì cắt
+   theo thứ tự đọc.
+6. **Embed insight** để search trả về insight (`doc_type=insight`, cite được).
+7. **Transformation-as-data**: task = `{name, prompt, model_id}` → thêm task không cần code.
+8. **Frontend TypeScript (Vite)** gọi API HTTP — thoả yêu cầu TS, vẫn không Qt.
+9. **Đóng gói**: PyInstaller (Windows) cho lõi+API; Quick popup đóng gói riêng.

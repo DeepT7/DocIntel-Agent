@@ -5,7 +5,7 @@ import statistics
 from pathlib import Path 
 
 from app.reasoning.rag_graph import run_rag, flush_traces
-from app.reasoning.answer import _generate_openrouter
+from app.core.config import OPENROUTER_UTILITY_MODELS
 from app.core.text import clean_data
 from app.core.prompts import build_judge_prompt
 
@@ -21,7 +21,8 @@ CRITERIA = [
     "citation_accuracy",
 ]
 
-JUDGE_MODEL = "qwen/qwen3-30b-a3b-instruct-2507"
+# Judge uses the same fast utility model as the rest of the auxiliary tasks.
+JUDGE_MODEL = OPENROUTER_UTILITY_MODELS[0]
 
 def load_questions(path: Path) -> list[dict]:
     return json.loads(Path(path).read_text(encoding="utf-8"))["questions"]

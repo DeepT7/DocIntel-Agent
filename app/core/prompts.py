@@ -116,14 +116,25 @@ __OUTLINE__
 User message: __QUERY__
 
 Return ONLY a JSON object, no prose:
-{"section_ids": ["<id>", ...]}
+{"is_section_request": true | false, "section_ids": ["<id>", ...]}
 
 Rules:
-- Return the ids of the sections the message asks about. One id is usual; more for a comparison.
-- Resolve a section only when the message identifies it as a section: by number ("section 4.1"), by title ("the experimental setup section"), or by a deictic reference ("in that section").
+- `is_section_request` is true ONLY when the message asks about a section of THIS document: by number ("section 4.1"), by title ("the experimental setup section"), or by a deictic reference ("in that section").
+- A number used as a measurement, version, date, code line, percentage, or quantity is NOT a section reference: "5.2 seconds", "version 2.0", "GPT-4.1", "12%".
+- A word like "section" inside a compound is NOT a section reference: "cross-section area", "sectional view".
+- A general content question that merely contains a word appearing in a heading (for example "what datasets did they build?") is NOT a section request.
+- If `is_section_request` is false, `section_ids` MUST be [].
 - If the message asks about a parent section ("section 4"), return only the parent id. Its whole subtree is included automatically.
-- A general content question that merely contains a word appearing in a heading (for example "what datasets did they build?") is NOT a section request: return {"section_ids": []} so the whole document is searched.
 - Use only ids from the outline. Never invent an id.
+
+Examples (any language):
+- "section 5.2 nói gì?" -> {"is_section_request": true, "section_ids": ["<id of 5.2>"]}
+- "5.2 seconds" -> {"is_section_request": false, "section_ids": []}
+- "What is the cross-section area?" -> {"is_section_request": false, "section_ids": []}
+- "what datasets did they build?" -> {"is_section_request": false, "section_ids": []}
+- "the experimental setup section" -> {"is_section_request": true, "section_ids": ["<id>"]}
+- "chapitre 4" -> {"is_section_request": true, "section_ids": ["<id of 4>"]}
+- "第4章" -> {"is_section_request": true, "section_ids": ["<id of 4>"]}
 
 JSON:"""
 

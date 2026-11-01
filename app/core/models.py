@@ -45,6 +45,8 @@ class RAGState(TypedDict):
     doc_paths: NotRequired[list[str]]
     top_k: NotRequired[int]
     allow_external: NotRequired[bool]
+    # Thinking mode: ask the generation model to reason before answering.
+    thinking: NotRequired[bool]
     chat_history: NotRequired[list[dict]]
     intent: NotRequired[str]  # "chat" (small talk / meta) or "question"
     standalone_query: NotRequired[str]

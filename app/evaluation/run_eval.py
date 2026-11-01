@@ -6,7 +6,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from app.retrieval.retrieve import vector_search, dense_search
-from app.core.config import DEFAULT_TOP_K
 from app.core.tracing import (
     observe as _observe,
     update_current_span as _update_current_span,

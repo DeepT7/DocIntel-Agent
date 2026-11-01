@@ -14,8 +14,16 @@ import webview
 
 from desktop.api import Api
 
+from app.core.config import (
+    DESKTOP_HOTKEY,
+    MAIN_WINDOW_HEIGHT,
+    MAIN_WINDOW_WIDTH,
+    QUICK_WINDOW_HEIGHT,
+    QUICK_WINDOW_WIDTH,
+)
+
 UI_DIR = Path(__file__).resolve().parent / "ui"
-HOTKEY = "<ctrl>+<alt>+space"
+HOTKEY = DESKTOP_HOTKEY
 
 
 def _toggle_quick(quick: webview.Window, api: Api) -> None:
@@ -49,8 +57,8 @@ def main() -> None:
     quick = webview.create_window(
         "Trợ lý viết",
         url=str(UI_DIR / "quick.html"),
-        width=470,
-        height=580,
+        width=QUICK_WINDOW_WIDTH,
+        height=QUICK_WINDOW_HEIGHT,
         on_top=True,
         frameless=True,
         resizable=False,
@@ -60,8 +68,8 @@ def main() -> None:
     main_window = webview.create_window(
         "DocIntel — Trợ lý tài liệu",
         url=str(UI_DIR / "main.html"),
-        width=1200,
-        height=800,
+        width=MAIN_WINDOW_WIDTH,
+        height=MAIN_WINDOW_HEIGHT,
         js_api=api,
         hidden=False,
     )

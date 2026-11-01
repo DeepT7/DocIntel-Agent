@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from app.core.scope import normalize_root
 from app.ingestion.folder import sync_folder
 
 

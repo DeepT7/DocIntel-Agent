@@ -1,4 +1,6 @@
 import os
+import re
+from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
@@ -19,7 +21,19 @@ from app.reasoning.answer import (
     resolve_section,
     rewrite_query,
 )
-from app.core.config import DEFAULT_MODEL, DEFAULT_TOP_K
+from app.core.config import (
+    DEFAULT_MODEL,
+    DEFAULT_TOP_K,
+    GRADE_SKIP_THRESHOLD,
+    MAX_REWRITES,
+    MAX_SECTION_CHUNKS,
+    MAX_SECTION_DOCS,
+    MAX_TOKENS,
+    SECTION_CAP_FLOOR,
+    SECTION_EXPAND_MAX_CHUNKS,
+    SECTION_EXPAND_PER_SECTION,
+    SECTION_PER_DOC_FLOOR,
+)
 from app.core.sections import flatten_sections
 from app.retrieval.retrieve import document_outline, section_chunks, vector_search
 from app.core.tracing import observe, update_current_span, set_trace_io, trace_context, flush_traces
@@ -27,11 +41,50 @@ from app.core.text import clean_text
 
 load_dotenv()
 
-# Section resolution is one fast model call per focused document. Cap the number
-# of documents so a wide comparison cannot turn into an unbounded LLM fan-out.
-MAX_SECTION_DOCS = 3
-# Total chunks pulled from resolved sections across all documents.
-MAX_SECTION_CHUNKS = 24
+_SECTION_REF_RE = re.compile(
+    # Explicit structural word + number (English/Vietnamese accelerator).
+    r"\b(?:section|sections|subsection|chapter|mục|phần|chương)\s+"
+    r"([A-Za-z]?\d+(?:\.\d+)*)"
+    # Dotted number: 4.1, A.1, B.2.3 (not a model version like GPT-4.1).
+    r"|(?<![A-Za-z0-9_-])([A-Za-z]?\d+(?:\.\d+)+)(?![A-Za-z0-9])"
+    # Bare number, including CJK adjacency ("第4章"), but not a model version
+    # ("GPT-4", "GPT-4.1", "model4"). The resolver validates the actual section.
+    r"|(?<![A-Za-z0-9_.-])(\d+)(?![A-Za-z0-9_])",
+    re.IGNORECASE,
+)
+
+
+def _section_references(query: str) -> list[str]:
+    """Distinct section numbers named by the message, in order ("4", "4.1")."""
+    refs: list[str] = []
+    for match in _SECTION_REF_RE.finditer(query or ""):
+        ref = next((group for group in match.groups() if group), "")
+        if ref and ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def _normalize_doc_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _mentions_doc(query: str, path: str) -> bool:
+    normalized = _normalize_doc_text(query)
+    if not normalized:
+        return False
+    stem = _normalize_doc_text(Path(path).stem)
+    name = _normalize_doc_text(Path(path).name)
+    return bool(
+        (stem and stem in normalized) or (name and name in normalized)
+    )
+
+
+def _query_is_doc_specific(query: str, path: str, all_paths: list[str]) -> bool:
+    """True when the query does not name a different document."""
+    return not any(
+        other != path and _mentions_doc(query, other) for other in all_paths
+    )
+
 
 _client = None
 
@@ -70,7 +123,7 @@ def chat_node(state: RAGState) -> dict:
     query = state["query"]
     history = state.get("chat_history", []) or []
     prompt = build_chat_prompt(query, format_history(history))
-    answer = _generate(prompt, max_tokens=200)
+    answer = _generate(prompt, max_tokens=MAX_TOKENS["chat_node"])
     update_current_span(output=answer, intent="chat")
     return {"context": "", "answer": answer, "sources": [], "intent": "chat"}
 
@@ -81,7 +134,7 @@ def workspace_node(state: RAGState) -> dict:
     scope = state.get("scope")
     files = list_files(scope) if scope else []
     prompt = build_workspace_prompt(scope or "", files, state["query"])
-    answer = _generate(prompt, max_tokens=800)
+    answer = _generate(prompt, max_tokens=MAX_TOKENS["workspace_node"])
     update_current_span(output=answer, intent="workspace", num_files=len(files))
     return {"context": "", "answer": answer, "sources": [], "intent": "workspace"}
 
@@ -116,6 +169,37 @@ def retrieve_node(state: RAGState) -> dict:
     locked_chunk_ids: set[str] = set()
     results: list[dict] = []
     focus_paths = doc_paths[:MAX_SECTION_DOCS] if doc_paths else []
+    router_queries = state.get("queries") or []
+    # Best-effort comparison mapping: the router emits one rewritten query per
+    # side, in the same order as target_doc_ids. Use it only when the counts line
+    # up AND the queries are distinct; some models return the same mixed query
+    # twice, and pairing that with each document would lock the wrong sections.
+    section_queries = (
+        router_queries
+        if (
+            len(focus_paths) > 1
+            and len(router_queries) == len(focus_paths)
+            and len(set(router_queries)) == len(router_queries)
+            and all(
+                _query_is_doc_specific(query, path, focus_paths)
+                for query, path in zip(router_queries, focus_paths)
+            )
+        )
+        else None
+    )
+    # Fallback comparison mapping when the router did not return usable per-side
+    # queries. Section numbers are ordered as they appear in the message and are
+    # paired with the ordered target documents. This handles the common
+    # "section 4 of the first paper / section 3 of the second" shape without
+    # guessing when the counts do not line up.
+    if len(focus_paths) > 1 and not section_queries:
+        refs = _section_references(query)
+        if len(refs) == len(focus_paths):
+            section_queries = [f"section {ref}" for ref in refs]
+        elif len(refs) == 1:
+            section_queries = [query] * len(focus_paths)
+        elif len(refs) > 1:
+            focus_paths = []
     if focus_paths:
         # Reserve room for vector retrieval when there are documents beyond the
         # section-resolution cap, then split the rest evenly across focused docs.
@@ -123,13 +207,14 @@ def retrieve_node(state: RAGState) -> dict:
         # context slot.
         section_cap = MAX_SECTION_CHUNKS
         if doc_paths and len(doc_paths) > MAX_SECTION_DOCS:
-            section_cap = max(MAX_SECTION_CHUNKS - top_k, 6)
-        per_doc_budget = max(4, section_cap // len(focus_paths))
-        for path in focus_paths:
+            section_cap = max(MAX_SECTION_CHUNKS - top_k, SECTION_CAP_FLOOR)
+        per_doc_budget = max(SECTION_PER_DOC_FLOOR, section_cap // len(focus_paths))
+        for index, path in enumerate(focus_paths):
             outline = document_outline(scope, path)
             sections = flatten_sections(outline.get("tree") or [])
+            section_query = section_queries[index] if section_queries else query
             section_ids = resolve_section(
-                query, outline.get("title") or path, sections
+                section_query, outline.get("title") or path, sections
             )
             if not section_ids:
                 continue
@@ -166,7 +251,7 @@ def retrieve_node(state: RAGState) -> dict:
     if need_vector and len(results) < MAX_SECTION_CHUNKS:
         # Router sub-queries: run each, then merge (dedup by chunk_id). This is
         # the "decompose a comparison into per-side queries" step.
-        queries = state.get("queries") or []
+        queries = router_queries
         if len(queries) > 1:
             merged: list[dict] = []
             seen: set[str] = set(locked_chunk_ids)
@@ -243,7 +328,7 @@ def grade_node(state: RAGState) -> dict:
         default=0.0,
     )
     # Skip the (slow) LLM grading call when retrieval is already confident.
-    if top_score >= 0.5:
+    if top_score >= GRADE_SKIP_THRESHOLD:
         graded = unlocked
         gated = True
     else:
@@ -271,7 +356,7 @@ def rewrite_node(state: RAGState) -> dict:
 def route_after_grade(state: RAGState):
     if state.get("graded_ok"):
         return "answer"
-    if state.get("rewrite_count", 0) < 1: # Permitted to rewrite one time
+    if state.get("rewrite_count", 0) < MAX_REWRITES: # Permitted to rewrite a limited number of times
         return "rewrite"
     # Local-first default: do not silently send the query to the web.
     if not state.get("allow_external", True):
@@ -281,8 +366,8 @@ def route_after_grade(state: RAGState):
 def _expand_to_sections(
     chunks: list[dict],
     scope: str | None,
-    per_section: int = 4,
-    max_chunks: int = 16,
+    per_section: int = SECTION_EXPAND_PER_SECTION,
+    max_chunks: int = SECTION_EXPAND_MAX_CHUNKS,
 ) -> list[dict]:
     """Small-to-big: widen each retrieved chunk to its whole section.
 
@@ -332,7 +417,7 @@ def answer_node(state: RAGState) -> dict:
     retrieved_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
     sources = _expand_to_sections(retrieved_chunks, state.get("scope"))
     context = format_context(sources)
-    answer = generate_answer(query, context)
+    answer = generate_answer(query, context, thinking=state.get("thinking", False))
     update_current_span(output=answer, num_sources=len(sources), answer_chars=len(answer))
 
     return {
@@ -457,7 +542,7 @@ def answer_with_fallback_node(state: RAGState) -> dict:
         context_parts.append("External grounded web context:\n" + external_context)
 
     combined_context = "\n\n".join(part for part in context_parts if part).strip()
-    answer = generate_answer(query, combined_context)
+    answer = generate_answer(query, combined_context, thinking=state.get("thinking", False))
     sources = [*internal_chunks, *state.get("external_sources", [])]
     update_current_span(output=answer, num_sources=len(sources), answer_chars=len(answer))
 
@@ -534,6 +619,7 @@ def run_rag(
     doc_paths: list[str] | None = None,
     top_k: int | None = None,
     allow_external: bool = True,
+    thinking: bool = False,
     intent: str | None = None,
     queries: list[str] | None = None,
 ) -> RAGState:
@@ -552,6 +638,7 @@ def run_rag(
                 "doc_paths": doc_paths,
                 "top_k": top_k,
                 "allow_external": allow_external,
+                "thinking": thinking,
                 "intent": intent,
                 "queries": queries or [],
             }
@@ -577,12 +664,15 @@ def run_cli() -> None:
         Panel.fit(
             "[bold]LangGraph RAG[/bold] — hỏi đáp tài liệu LangChain/LangGraph\n"
             "Hỏi nối tiếp được (giữ ngữ cảnh). Lệnh: "
-            "[cyan]:reset[/cyan] xoá lịch sử · [cyan]exit[/cyan]/[cyan]quit[/cyan] thoát.",
+            "[cyan]:reset[/cyan] xoá lịch sử · [cyan]:web[/cyan] bật/tắt web · "
+            "[cyan]:think[/cyan] bật/tắt suy luận · [cyan]exit[/cyan]/[cyan]quit[/cyan] thoát.",
             border_style="cyan",
         )
     )
 
     history: list[dict] = []
+    allow_external = False
+    thinking = False
 
     while True:
         turns = len(history) // 2
@@ -600,13 +690,26 @@ def run_cli() -> None:
             history.clear()
             console.print("[dim]Đã xoá lịch sử hội thoại.[/dim]")
             continue
+        if lowered in {":web", "web"}:
+            allow_external = not allow_external
+            console.print(f"[dim]Web search: {'ON' if allow_external else 'OFF'}[/dim]")
+            continue
+        if lowered in {":think", "think"}:
+            thinking = not thinking
+            console.print(f"[dim]Thinking: {'ON' if thinking else 'OFF'}[/dim]")
+            continue
         if not query:
             continue
 
         started = time.perf_counter()
         console.print("[dim]Đang truy xuất và sinh câu trả lời...[/dim]")
         try:
-            result = run_rag(query, chat_history=history)
+            result = run_rag(
+                query,
+                chat_history=history,
+                allow_external=allow_external,
+                thinking=thinking,
+            )
         except Exception as error:  # keep the REPL alive on provider failures
             console.print(f"[bold red]Lỗi:[/bold red] {error}")
             continue

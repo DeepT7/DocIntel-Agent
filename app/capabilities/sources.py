@@ -2,7 +2,7 @@
 
 from qdrant_client.http import models
 
-from app.core.config import QDRANT_COLLECTION
+from app.core.config import QDRANT_COLLECTION, SCROLL_PAGE_SIZE
 from app.core.scope import normalize_root
 from app.retrieval.store import get_client
 
@@ -26,7 +26,7 @@ def list_sources(scope: str) -> list[dict]:
     while True:
         points, offset = client.scroll(
             collection_name=QDRANT_COLLECTION,
-            limit=256,
+            limit=SCROLL_PAGE_SIZE,
             offset=offset,
             with_payload=True,
             with_vectors=False,

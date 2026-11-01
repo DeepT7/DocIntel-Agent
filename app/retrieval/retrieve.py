@@ -18,8 +18,15 @@ from qdrant_client.http import models
 from app.core.config import (
     DEFAULT_TOP_K,
     DENSE_VECTOR_NAME,
+    FETCH_MIN_EXTRA,
+    FETCH_MULTIPLIER,
     HYBRID_PREFETCH_LIMIT,
     QDRANT_COLLECTION,
+    REFERENCE_DENSITY_THRESHOLD,
+    REFERENCE_DENSITY_WINDOW,
+    REFERENCE_MIN_TEXT,
+    REFERENCE_PENALTY,
+    SECTION_CHUNKS_LIMIT,
     SPARSE_MODEL,
     SPARSE_VECTOR_NAME,
 )
@@ -87,11 +94,11 @@ def _is_reference_like(payload: dict) -> bool:
     if _REFERENCE_HEADING_RE.search(heading):
         return True
     text = payload.get("text") or ""
-    if len(text) < 200:
+    if len(text) < REFERENCE_MIN_TEXT:
         return False
-    # ~2+ citation markers per 500 characters => bibliography-like.
-    density = len(_CITATION_RE.findall(text)) / (len(text) / 500)
-    return density >= 2.0
+    # ~2+ citation markers per N characters => bibliography-like.
+    density = len(_CITATION_RE.findall(text)) / (len(text) / REFERENCE_DENSITY_WINDOW)
+    return density >= REFERENCE_DENSITY_THRESHOLD
 
 
 def _to_result(payload: dict, score: float, semantic: float, keyword: float) -> dict:
@@ -172,7 +179,7 @@ def vector_search(
     # Qdrant encodes the BM25 query text itself (fastembed), so no helper needed.
     query_sparse = models.Document(text=query, model=SPARSE_MODEL)
     # Fetch more than requested so dropping reference sections still leaves top_k.
-    fetch_limit = max(top_k * 3, top_k + 10)
+    fetch_limit = max(top_k * FETCH_MULTIPLIER, top_k + FETCH_MIN_EXTRA)
     prefetch_limit = max(fetch_limit * 2, HYBRID_PREFETCH_LIMIT)
 
     # The fused RRF score is only a rank aggregate, so fetch the dense cosine
@@ -212,7 +219,7 @@ def vector_search(
     # Down-weight bibliography-like chunks instead of dropping them: they stop
     # crowding the top for content queries, yet remain reachable when the query
     # is genuinely about references.
-    reference_penalty = 0.4
+    reference_penalty = REFERENCE_PENALTY
     scored = []
     for hit in fused:
         payload = hit.payload or {}
@@ -227,13 +234,14 @@ def section_chunks(
     scope: str | None,
     path: str,
     section_ids: str | list[str],
-    limit: int = 20,
+    limit: int = SECTION_CHUNKS_LIMIT,
     include_descendants: bool = False,
 ) -> list[dict]:
     """All indexed chunks of one or more sections, in document order.
 
-    ``section_ids`` are the structural ids stored at ingestion (``s4``,
-    ``s4.1``). With ``include_descendants=True`` the filter is applied to
+    ``section_ids`` are the canonical materialized-path ids stored at ingestion
+    (``s4``, ``s4.1``, with ``x`` fallbacks for unnumbered headings). With
+    ``include_descendants=True`` the filter is applied to
     ``section_ancestors``, so a parent id returns its whole subtree (and a child
     id returns just that branch, including its table chunks). With
     ``include_descendants=False`` it filters the exact ``section_id`` — used by

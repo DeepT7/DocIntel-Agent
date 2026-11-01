@@ -8,16 +8,15 @@ answer instead of sending the query to the web (opt in with ``allow_external``).
 
 from pathlib import Path
 
+from app.core.config import (
+    ASK_TOP_K,
+    HISTORY_MAX_MESSAGES,
+    MAX_TOKENS,
+)
 from app.core.prompts import NO_CONTEXT_SYSTEM, build_no_context_prompt
 from app.core.scope import normalize_root
 from app.reasoning.answer import _generate, format_history
 from app.reasoning.rag_graph import run_rag
-
-
-# Q&A benefits from a few more candidates than a plain lookup: a natural
-# question often matches several sections, and the answer may sit in a chunk
-# that is not the single best lexical match.
-ASK_TOP_K = 8
 
 
 def ask(
@@ -25,6 +24,7 @@ def ask(
     query: str,
     chat_history: list[dict] | None = None,
     allow_external: bool = False,
+    thinking: bool = False,
     doc_paths: list[str] | None = None,
     top_k: int | None = None,
     intent: str | None = None,
@@ -49,6 +49,7 @@ def ask(
         doc_paths=paths,
         top_k=top_k or ASK_TOP_K,
         allow_external=allow_external,
+        thinking=thinking,
         intent=intent,
         queries=queries,
     )
@@ -60,6 +61,8 @@ def ask(
         "standalone_query": result.get("standalone_query", query),
         "answer": result.get("answer", ""),
         "sources": result.get("sources", []),
+        "section_locks": result.get("section_locks", {}),
+        "section_locked_chunk_ids": result.get("section_locked_chunk_ids", []),
     }
 
 
@@ -69,6 +72,7 @@ def answer_without_context(
     chat_history: list[dict] | None = None,
     notes: list[str] | None = None,
     files: list[str] | None = None,
+    thinking: bool = False,
 ) -> dict:
     """Answer in "No-Context / Notes Only" mode (every source switched off).
 
@@ -100,12 +104,13 @@ def answer_without_context(
     answer = _generate(
         build_no_context_prompt(
             query,
-            format_history(chat_history or [], max_messages=6),
+            format_history(chat_history or [], max_messages=HISTORY_MAX_MESSAGES),
             files_text,
             len(file_list),
             notes_text,
         ),
         system=NO_CONTEXT_SYSTEM,
-        max_tokens=1200,
+        max_tokens=MAX_TOKENS["no_context_thinking" if thinking else "no_context"],
+        thinking=thinking,
     )
     return {**empty, "answer": answer}

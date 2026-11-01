@@ -43,7 +43,13 @@ from pathlib import Path
 
 from qdrant_client import QdrantClient
 
-from app.core.config import QDRANT_COLLECTION, QDRANT_PATH, QDRANT_URL
+from app.core.config import (
+    QDRANT_COLLECTION,
+    QDRANT_PATH,
+    QDRANT_URL,
+    STORE_OPEN_RETRIES,
+    STORE_OPEN_RETRY_DELAY,
+)
 
 COLLECTION = QDRANT_COLLECTION
 
@@ -62,8 +68,8 @@ _PID_FILE = QDRANT_PATH / ".docintel.pid"
 
 # A reload or a quick restart may take a moment to release the lock; retry a few
 # times before declaring a real conflict.
-_OPEN_RETRIES = 5
-_OPEN_RETRY_DELAY = 0.6
+_OPEN_RETRIES = STORE_OPEN_RETRIES
+_OPEN_RETRY_DELAY = STORE_OPEN_RETRY_DELAY
 
 
 def _is_locked_error(error: BaseException) -> bool:

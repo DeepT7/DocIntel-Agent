@@ -7,6 +7,8 @@ ambient Quick window.
 Run:  uvicorn app.server.main:app --reload --port 8756
 """
 
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import app_state, jobs
+from app.core.config import DEFAULT_TOP_K, PRIMARY_DOCS_MAX
+from app.core.scope import validate_folder
+from app.indexing.manager import get_manager
 from app.capabilities.ask import (
     answer_without_context as cap_answer_without_context,
     ask as cap_ask,
@@ -29,6 +34,7 @@ from app.capabilities.registry import (
     list_cards as cap_list_cards,
 )
 from app.capabilities.router import (
+    VALID_SCOPE_MODES,
     resolve_scope as cap_resolve_scope,
     route as cap_route,
 )
@@ -37,7 +43,23 @@ from app.capabilities.sources import list_sources as cap_sources
 from app.capabilities.suggest import suggest as cap_suggest
 from app.capabilities.sync import sync as cap_sync
 
-app = FastAPI(title="DocIntel", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Start the background indexer/watcher for the remembered folder."""
+    manager = get_manager()
+    scope = app_state.get_scope()
+    if scope:
+        try:
+            manager.start(scope)
+        except Exception as error:  # a bad saved folder must not block the API
+            print(f"warning: could not start file watcher: {error}")
+    try:
+        yield
+    finally:
+        manager.shutdown()
+
+
+app = FastAPI(title="DocIntel", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,7 +88,7 @@ class SearchRequest(BaseModel):
     scope: Optional[str] = None
     path: Optional[str] = None
     paths: Optional[list[str]] = None
-    top_k: int = 5
+    top_k: int = DEFAULT_TOP_K
 
 
 class SuggestRequest(BaseModel):
@@ -91,6 +113,9 @@ class AskRequest(BaseModel):
     # Distinguishes "no filter" from "the user unchecked everything".
     use_selection: bool = False
     allow_external: bool = False
+    # Thinking mode: let the answer model reason before answering (slower and
+    # more expensive, but better on multi-step questions).
+    thinking: bool = False
     save: bool = True
 
 
@@ -142,8 +167,19 @@ def state(conversation_id: str = app_state.DEFAULT_CONVERSATION) -> dict:
 
 @app.post("/api/scope")
 def set_scope(request: ScopeRequest) -> dict:
+    # Use the folder exactly as the user typed it, but check that it is a real
+    # directory first (a mistyped path must not create a stray folder).
+    try:
+        path = validate_folder(request.path)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
     conv_id = request.conversation_id or app_state.DEFAULT_CONVERSATION
-    app_state.set_scope(request.path, conv_id)
+    app_state.set_scope(path.as_posix(), conv_id)
+    # Mechanism 3: start watching the new folder (previous watcher is stopped).
+    try:
+        get_manager().start(path.as_posix())
+    except Exception as error:
+        print(f"warning: could not start file watcher: {error}")
     return app_state.snapshot(conv_id)
 
 
@@ -152,7 +188,47 @@ def sync(request: SyncRequest) -> dict:
     scope = _resolve_scope(request.scope)
     if not scope:
         raise HTTPException(status_code=400, detail="no scope selected")
-    return cap_sync(scope)
+    try:
+        stats = cap_sync(scope)
+    except (FileNotFoundError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    # Keep real-time updates on for the folder that was just indexed.
+    get_manager().ensure_watcher(scope)
+    return stats
+
+
+@app.get("/api/tree")
+def tree(scope: Optional[str] = None) -> dict:
+    """Mechanism 1: folder structure + file metadata, without reading contents."""
+    scope = _resolve_scope(scope)
+    if not scope:
+        raise HTTPException(status_code=400, detail="no scope selected")
+    try:
+        return get_manager().tree(scope)
+    except (FileNotFoundError, OSError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/api/file")
+def file_content(
+    scope: Optional[str] = None,
+    path: str = "",
+    max_bytes: Optional[int] = None,
+) -> dict:
+    """Mechanism 4: read one raw file from disk on demand."""
+    scope = _resolve_scope(scope)
+    if not scope:
+        raise HTTPException(status_code=400, detail="no scope selected")
+    try:
+        return get_manager().read(scope, path, max_bytes)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/api/index/status")
+def index_status(scope: Optional[str] = None) -> dict:
+    """Watcher mode, queue depth and file-state counters."""
+    return get_manager().status(_resolve_scope(scope))
 
 
 @app.get("/api/sources")
@@ -208,26 +284,49 @@ def suggest(request: SuggestRequest) -> dict:
 # --------------------------------------------------------------------------- #
 # Q&A over the folder (LangGraph RAG, scoped, multi-turn)
 # --------------------------------------------------------------------------- #
-@app.post("/api/ask")
-def ask(request: AskRequest) -> dict:
-    scope = _resolve_scope(request.scope)
-    if not scope:
-        raise HTTPException(status_code=400, detail="no scope selected")
-    conv_id = request.conversation_id or app_state.DEFAULT_CONVERSATION
+@dataclass
+class TurnPlan:
+    """Everything one /api/ask turn needs, decided in exactly one place.
+
+    All precedence rules live in ``decide_turn``; ``ask`` only executes the
+    plan, so scope handling can never drift between two guardrails.
+    """
+
+    history: list[dict]        # messages used for this turn
+    no_context: bool           # No-Context / Notes Only mode
+    requested: list[str]       # explicit path(s) from the request
+    routed_docs: list[str]     # documents the router picked (for mentions)
+    last_used: list[str]       # exact scope of the previous turn
+    source_files: list[str]    # every file in the folder (no-context branch)
+    intent: str
+    mode: str                  # scope_mode, normalized
+    target: list[str] | None   # final scope; None = whole folder
+    queries: list[str]         # per-document queries, aligned with target
+    mentions: list[str]        # documents named this turn (working-set chips)
+
+
+def decide_turn(request: AskRequest, scope: str, conv_id: str) -> TurnPlan:
+    """Decide the whole turn — history, intent, scope, queries — in ONE function.
+
+    Document scope for this turn. One LLM turn-router (Cấp độ 3) decides both
+    the intent and which files the message is about, by content (Document
+    Cards), not by matching file names. Precedence (highest first):
+
+        explicit path(s) in the request -> exactly those
+        sidebar source selection (L1)   -> the checked files
+        router target_doc_ids           -> those documents
+        inherit previous turn           -> last_used (guardrail)
+        otherwise                       -> None: search the whole folder
+    """
     history = request.history
     if history is None and request.use_session:
         history = app_state.get_session(conv_id)
     else:
         history = history or []
 
-    # Document scope for this turn. One LLM turn-router (Cấp độ 3) decides both
-    # the intent and which files the message is about, by content (Document Cards),
-    # not by matching file names. Precedence:
-    #   explicit path(s) in the request -> exactly those
-    #   sidebar source selection (L1)   -> the checked files
-    #   router target_doc_ids           -> those documents
-    #   otherwise                       -> None: search the whole folder
-    requested = list(dict.fromkeys([*(request.paths or []), *( [request.path] if request.path else [] )]))
+    requested = list(dict.fromkeys(
+        [*(request.paths or []), *([request.path] if request.path else [])]
+    ))
     sources = cap_sources(scope) if (request.use_session or request.use_selection) else []
     source_paths = {s["path"] for s in sources if s.get("path")}
     # Exact scope of the previous turn, minus files that no longer exist.
@@ -239,96 +338,160 @@ def ask(request: AskRequest) -> dict:
     # signal, so "everything unchecked" is a real state: switch to No-Context /
     # Notes Only instead of silently searching the excluded files.
     selected: list[str] | None = None
-    no_sources = False
+    no_context = False
     if request.use_selection:
         excluded = set(app_state.get_excluded_docs())
         if excluded:
-            selected = [s["path"] for s in sources if s.get("path") and s["path"] not in excluded]
-            # Every source switched off -> No-Context / Notes Only mode. Explicit
-            # request paths still win, so only enter it when none were given.
-            no_sources = not selected and not requested
+            selected = [
+                s["path"] for s in sources
+                if s.get("path") and s["path"] not in excluded
+            ]
+            # Explicit request paths still win, so only enter No-Context when
+            # none were given.
+            no_context = not selected and not requested
 
-    if no_sources:
+    if no_context:
         # No document cards and no router: the no-context prompt handles chat,
         # workspace metadata, notes and general knowledge in one turn.
-        routed = {"intent": "no_context", "scope_mode": "", "doc_paths": [], "queries": []}
-    elif request.use_session:
+        return TurnPlan(
+            history=history, no_context=True, requested=requested, routed_docs=[],
+            last_used=last_used,
+            source_files=[s.get("path") for s in sources if s.get("path")],
+            intent="no_context", mode="", target=None, queries=[], mentions=[],
+        )
+
+    if request.use_session:
         # The previous scope is passed explicitly; the model no longer has to
         # rediscover it from the last four messages.
         routed = cap_route(scope, request.query, history, current_docs=last_used)
     else:
         routed = {"intent": "question", "scope_mode": "", "doc_paths": [], "queries": []}
+
     intent = routed.get("intent", "question")
-    scope_mode = routed.get("scope_mode", "")
     routed_docs = list(routed.get("doc_paths") or [])
     routed_queries = list(routed.get("queries") or [])
+    mode = str(routed.get("scope_mode") or "").strip().upper()
+    if mode not in VALID_SCOPE_MODES:
+        mode = ""  # _resolve_target applies the deterministic fallback
 
-    working = app_state.get_active_docs(conv_id)   # documents named so far (UI chips)
+    target, mode = _resolve_target(
+        requested, selected, intent, mode, routed_docs, last_used
+    )
+    queries = _align_queries(target, routed_docs, routed_queries)
 
-    if requested:
-        target = requested
-        scope_mode = "EXPLICIT_DOCS"
-    elif no_sources:
-        target = None
-        scope_mode = ""
-    elif selected is not None:
-        target = selected
-        scope_mode = "EXPLICIT_DOCS"
-    else:
-        target = cap_resolve_scope(intent, scope_mode, routed_docs, last_used)
-        if scope_mode == "INHERIT_PREVIOUS" and not target:
-            scope_mode = "GLOBAL_FOLDER"  # nothing to inherit on the first turn
-        elif not scope_mode:
-            # Normalise a missing/invalid router mode to the effective one.
-            if target and intent == "followup" and target == last_used:
-                scope_mode = "INHERIT_PREVIOUS"
-            elif target:
-                scope_mode = "EXPLICIT_DOCS"
-            else:
-                scope_mode = "GLOBAL_FOLDER"
-
+    # Documents "named" this turn, for the working-set chips: explicit request
+    # paths, the router's picks, or an inherited previous scope.
     inherited = (target or []) if (
-        scope_mode == "INHERIT_PREVIOUS"
+        mode == "INHERIT_PREVIOUS"
         or (intent == "followup" and not routed_docs and target and target == last_used)
     ) else []
-    mentioned = requested or routed_docs or inherited
-    if mentioned:
-        app_state.set_active_docs([*working, *mentioned], conv_id)
+    mentions = requested or routed_docs or inherited
 
-    if no_sources:
+    return TurnPlan(
+        history=history, no_context=False, requested=requested,
+        routed_docs=routed_docs, last_used=last_used,
+        source_files=[s.get("path") for s in sources if s.get("path")],
+        intent=intent, mode=mode, target=target, queries=queries,
+        mentions=mentions,
+    )
+
+
+def _resolve_target(
+    requested: list[str],
+    selected: list[str] | None,
+    intent: str,
+    mode: str,
+    routed_docs: list[str],
+    last_used: list[str],
+) -> tuple[list[str] | None, str]:
+    """Final document scope + normalized mode — the single precedence ladder."""
+    if requested:
+        return requested, "EXPLICIT_DOCS"
+    if selected is not None:
+        return selected, "EXPLICIT_DOCS"
+    target = cap_resolve_scope(intent, mode, routed_docs, last_used)
+    if mode == "INHERIT_PREVIOUS" and not target:
+        return target, "GLOBAL_FOLDER"  # nothing to inherit on the first turn
+    if not mode:
+        # Normalise a missing/invalid router mode to the effective one.
+        if target and intent == "followup" and target == last_used:
+            return target, "INHERIT_PREVIOUS"
+        if target:
+            return target, "EXPLICIT_DOCS"
+        return target, "GLOBAL_FOLDER"
+    return target, mode
+
+
+def _align_queries(
+    target: list[str] | None,
+    routed_docs: list[str],
+    routed_queries: list[str],
+) -> list[str]:
+    """Keep the router's per-side queries aligned with the final document order.
+
+    The router sees target_doc_ids in its own order; an explicit request or the
+    sidebar selection may present the same documents in a different order.
+    """
+    if (
+        target
+        and routed_docs
+        and len(target) == len(routed_docs)
+        and set(target) == set(routed_docs)
+        and len(routed_queries) == len(routed_docs)
+    ):
+        query_by_doc = dict(zip(routed_docs, routed_queries))
+        return [query_by_doc[path] for path in target]
+    return routed_queries
+
+
+@app.post("/api/ask")
+def ask(request: AskRequest) -> dict:
+    scope = _resolve_scope(request.scope)
+    if not scope:
+        raise HTTPException(status_code=400, detail="no scope selected")
+    conv_id = request.conversation_id or app_state.DEFAULT_CONVERSATION
+
+    plan = decide_turn(request, scope, conv_id)
+    working = app_state.get_active_docs(conv_id)   # documents named so far (UI chips)
+    if plan.mentions:
+        app_state.set_active_docs([*working, *plan.mentions], conv_id)
+
+    if plan.no_context:
         # No-Context / Notes Only: answer from history + open notes + file names +
         # general knowledge, and never touch the documents the user switched off.
         result = cap_answer_without_context(
             scope,
             request.query,
-            chat_history=history,
+            chat_history=plan.history,
             notes=request.notes,
-            files=[s.get("path") for s in sources if s.get("path")],
+            files=plan.source_files,
+            thinking=request.thinking,
         )
     else:
         result = cap_ask(
             scope,
             request.query,
-            chat_history=history,
+            chat_history=plan.history,
             allow_external=request.allow_external,
-            doc_paths=target or None,
+            thinking=request.thinking,
+            doc_paths=plan.target or None,
             top_k=request.top_k,
-            intent=intent,
-            queries=routed_queries or None,
+            intent=plan.intent,
+            queries=plan.queries or None,
         )
 
     # Remember the exact scope used this turn; the next follow-up inherits it.
-    app_state.set_last_used_docs(target or [], conv_id)
+    app_state.set_last_used_docs(plan.target or [], conv_id)
 
     # Learn the focus from what actually answered, so the next follow-up sticks.
-    if intent != "chat":
+    if plan.intent != "chat":
         answered = list(dict.fromkeys(
             s.get("path") for s in result.get("sources", []) if s.get("path")
-        ))[:3]
+        ))[:PRIMARY_DOCS_MAX]
         if answered:
             app_state.set_primary_docs(answered, conv_id)
-        elif target:
-            app_state.set_primary_docs(target, conv_id)
+        elif plan.target:
+            app_state.set_primary_docs(plan.target, conv_id)
 
     if request.save:
         # One atomic write for the whole turn (question + answer).
@@ -338,12 +501,12 @@ def ask(request: AskRequest) -> dict:
         )
     return {
         **result,
-        "intent": result.get("intent", intent),
-        "scope_mode": scope_mode,
+        "intent": result.get("intent", plan.intent),
+        "scope_mode": plan.mode,
         "conversation_id": conv_id,
         "working_set": app_state.get_active_docs(conv_id),
         "primary_docs": app_state.get_primary_docs(conv_id),
-        "routed_queries": routed_queries,
+        "routed_queries": plan.queries,
     }
 
 

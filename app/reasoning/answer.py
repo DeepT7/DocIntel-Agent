@@ -5,13 +5,27 @@ import re
 import time
 import requests
 from google import genai
+from google.genai import types
 from app.core.config import (
     DEFAULT_MODEL,
     DEFAULT_TOP_K,
+    GENERATION_BACKOFF_BASE,
+    GENERATION_EMPTY_RETRY_DELAY,
+    GENERATION_MAX_RETRIES,
     GENERATION_PROVIDER,
+    GENERATION_TIMEOUT,
+    GRADE_CHUNK_CHARS,
+    HISTORY_MAX_MESSAGES,
+    HISTORY_MAX_MESSAGES_CLASSIFY,
+    MAX_TOKENS,
+    MODEL_COOLDOWN_SECONDS,
     OPENROUTER_BASE_URL,
     OPENROUTER_GENERATION_MODELS,
     OPENROUTER_UTILITY_MODELS,
+    RETRYABLE_STATUS_CODES,
+    SECTION_IDS_MAX,
+    SECTION_QUERY_MIN_TITLE_CHARS,
+    SECTION_QUERY_MIN_TITLE_WORDS,
 )
 from app.core.prompts import (
     build_answer_prompt,
@@ -70,7 +84,7 @@ def format_context(results: list[RetrievedChunk | ExternalSource]) -> str:
 # Models that recently failed are skipped for a while, so every call does not
 # waste time re-trying a model that is rate-limited or down.
 _MODEL_COOLDOWN: dict[str, float] = {}
-COOLDOWN_SECONDS = 300
+COOLDOWN_SECONDS = MODEL_COOLDOWN_SECONDS
 
 
 def _ready_models(models: list[str]) -> list[str]:
@@ -86,9 +100,10 @@ def _cooldown(model: str) -> None:
 def _generate_openrouter(
     prompt: str,
     models: list[str] | None = None,
-    max_retries: int = 3,
+    max_retries: int = GENERATION_MAX_RETRIES,
     max_tokens: int = 4096,
     system: str | None = None,
+    thinking: bool = False,
 ) -> str:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
@@ -108,25 +123,26 @@ def _generate_openrouter(
         "max_tokens": max_tokens,
         # Let OpenRouter route to another provider when the first one flakes.
         "provider": {"allow_fallbacks": True},
-        # Reasoning models otherwise spend seconds (and tokens) on hidden
-        # chain-of-thought before answering. Ignored by models that lack it.
-        "reasoning": {"enabled": False},
+        # Thinking mode: let reasoning-capable models spend hidden tokens before
+        # answering. Off by default so a plain Q&A stays fast; ignored by models
+        # that lack reasoning support.
+        "reasoning": {"enabled": bool(thinking)},
     }
 
     last_error = "no models configured"
     for model in models:
         payload["model"] = model
         for attempt in range(max_retries):
-            response = requests.post(url, headers=headers, json=payload, timeout=180)
+            response = requests.post(url, headers=headers, json=payload, timeout=GENERATION_TIMEOUT)
 
-            if response.status_code in (429, 500, 502, 503, 504, 529):
+            if response.status_code in RETRYABLE_STATUS_CODES:
                 last_error = f"{model}: HTTP {response.status_code}"
                 if attempt == max_retries - 1:
                     _cooldown(model)
                     print(f"generate: {model} failed ({last_error}), cooling down {COOLDOWN_SECONDS}s")
                     break
                 retry_after = response.headers.get("Retry-After")
-                delay = float(retry_after) if retry_after else 3.0 * (2**attempt)
+                delay = float(retry_after) if retry_after else GENERATION_BACKOFF_BASE * (2**attempt)
                 print(f"generate: {model} retry {attempt + 1}/{max_retries} after {delay:.0f}s (HTTP {response.status_code})")
                 time.sleep(delay)
                 continue
@@ -151,7 +167,7 @@ def _generate_openrouter(
                 f"(finish={choice.get('finish_reason')}, usage={body.get('usage')})"
             )
             if attempt < max_retries - 1:
-                time.sleep(2)
+                time.sleep(GENERATION_EMPTY_RETRY_DELAY)
                 continue
             _cooldown(model)
             break
@@ -159,34 +175,69 @@ def _generate_openrouter(
     raise RuntimeError(f"generate(openrouter) failed for all models: {last_error}")
 
 
+def _gemini_thinking_config(thinking: bool) -> types.GenerateContentConfig:
+    """Explicit thinking configuration for the Gemini fallback provider.
+
+    Gemini 3 controls reasoning with ``thinking_level`` (no hard "off" — "low"
+    is the minimum); Gemini 2.5 and older use a token budget where 0 disables
+    thinking and -1 lets the model decide.
+    """
+    if DEFAULT_MODEL.startswith("gemini-3"):
+        return types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_level="high" if thinking else "low",
+                include_thoughts=False,
+            )
+        )
+    return types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(
+            thinking_budget=-1 if thinking else 0,
+            include_thoughts=False,
+        )
+    )
+
+
 def _generate(
     prompt: str,
     models: list[str] | None = None,
     max_tokens: int = 4096,
     system: str | None = None,
+    thinking: bool = False,
 ) -> str:
     """Send a raw prompt to the configured generation provider.
 
     ``system`` is sent as a real system message when the provider supports it
-    (OpenRouter); the Gemini fallback prepends it to the prompt.
+    (OpenRouter); the Gemini fallback prepends it to the prompt. ``thinking``
+    turns on model reasoning for this call (answer generation only — the fast
+    router/grader helpers keep it off).
     """
     if GENERATION_PROVIDER == "openrouter":
         return _generate_openrouter(
-            prompt, models=models, max_tokens=max_tokens, system=system
+            prompt,
+            models=models,
+            max_tokens=max_tokens,
+            system=system,
+            thinking=thinking,
         )
     contents = f"{system}\n\n{prompt}" if system else prompt
     response = _get_gemini_client().models.generate_content(
         model=DEFAULT_MODEL,
         contents=contents,
+        config=_gemini_thinking_config(thinking),
     )
     return getattr(response, "text", "").strip()
 
 
-def generate_answer(query: str, context: str) -> str:
-    return _generate(build_answer_prompt(query, context), max_tokens=700)
+def generate_answer(query: str, context: str, thinking: bool = False) -> str:
+    task = "answer_thinking" if thinking else "answer"
+    return _generate(
+        build_answer_prompt(query, context),
+        max_tokens=MAX_TOKENS[task],
+        thinking=thinking,
+    )
 
 
-def format_history(history: list[dict], max_messages: int = 6) -> str:
+def format_history(history: list[dict], max_messages: int = HISTORY_MAX_MESSAGES) -> str:
     """Render the most recent turns as plain text for the prompt."""
     lines = []
     for message in history[-max_messages:]:
@@ -205,7 +256,7 @@ def condense_question(question: str, history: list[dict]) -> str:
     prompt = build_condense_prompt(question, format_history(history))
     try:
         rewritten = _generate(
-            prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=128
+            prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=MAX_TOKENS["condense"]
         ).strip().strip('"').strip()
     except Exception as error:
         print(f"condense_question failed, using original question: {error}")
@@ -265,9 +316,9 @@ def classify_intent(query: str, history: list[dict] | None = None) -> str:
     query = (query or "").strip()
     if not query:
         return "chat"
-    prompt = build_route_prompt(query, format_history(history or [], max_messages=4))
+    prompt = build_route_prompt(query, format_history(history or [], max_messages=HISTORY_MAX_MESSAGES_CLASSIFY))
     try:
-        raw = _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=8).lower()
+        raw = _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=MAX_TOKENS["classify_intent"]).lower()
     except Exception as error:
         print(f"classify_intent failed, defaulting to question: {error}")
         return "question"
@@ -279,6 +330,7 @@ def _section_ids_from_response(raw: str, sections: list[dict]) -> list[str]:
     """Parse/validate the resolver's JSON, with a transparent title fallback."""
     valid = {str(section.get("id")): section for section in sections if section.get("id")}
     candidates: list[str] = []
+    is_section_request: bool | None = None
 
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
@@ -287,11 +339,21 @@ def _section_ids_from_response(raw: str, sections: list[dict]) -> list[str]:
         except json.JSONDecodeError:
             data = None
         if isinstance(data, dict):
+            flag = data.get("is_section_request")
+            if isinstance(flag, bool):
+                is_section_request = flag
+            elif isinstance(flag, str) and flag.strip().lower() in ("true", "false"):
+                is_section_request = flag.strip().lower() == "true"
             value = data.get("section_ids") or data.get("sections") or data.get("ids")
             if isinstance(value, str):
                 candidates = [part.strip() for part in value.split(",") if part.strip()]
             elif isinstance(value, list):
                 candidates = [str(item) for item in value]
+
+    # An explicit "this is not a section request" always wins, even if the model
+    # also emitted ids by mistake.
+    if is_section_request is False:
+        return []
 
     # Tolerate a bare list / comma-separated ids, and expand a value like
     # "s4, s4.1" if it slipped through as one string.
@@ -338,18 +400,28 @@ def _section_ids_from_response(raw: str, sections: list[dict]) -> list[str]:
             parent for parent in selected if not parent.startswith(section_id + ".")
         ]
         selected.append(section_id)
-    return selected[:4]
+    return selected[:SECTION_IDS_MAX]
 
 
-# A cheap, deterministic gate in front of the resolver. It is not a topic-word
-# list: it asks whether the message explicitly points at a section (a structural
-# word, a dotted section number, or a multi-word section title from THIS
-# document). A general question like "what datasets did they build?" therefore
-# never locks a section just because a heading contains "Dataset".
+# A cheap, deterministic gate in front of the resolver. The primary signals are
+# language-independent: a section number (4.1, A.1, or a bare number that matches
+# a number in THIS document) or a multi-word title from THIS document. The
+# English/Vietnamese structural words are only an accelerator; they are not the
+# contract. The resolver itself is multilingual once it is called.
 _SECTION_WORD = re.compile(
-    r"\b(section|sections|subsection|chapter|mục|phần|chương)\b", re.IGNORECASE
+    # Do not match a compound like "cross-section" or "sectional".
+    r"(?<![\w-])(section|sections|subsection|chapter|mục|phần|chương)(?![\w-])",
+    re.IGNORECASE,
 )
-_DOTTED_NUMBER = re.compile(r"\b\d+(?:\.\d+)+\b")
+# Dotted number, optionally letter-prefixed: 4.1, 2.3.1, A.1, B.2.
+_DOTTED_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_-])[A-Za-z]?\d+(?:\.\d+)+(?![A-Za-z0-9])"
+)
+# Bare number, including CJK adjacency ("第4章"), but not a model version
+# ("GPT-4", "model4"). Used only when the number exists in the outline.
+_BARE_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9_.-])(\d+)(?![A-Za-z0-9_])"
+)
 
 
 def _normalize_text(text: str) -> str:
@@ -360,6 +432,19 @@ def _looks_like_section_query(query: str, sections: list[dict]) -> bool:
     query = query or ""
     if _SECTION_WORD.search(query) or _DOTTED_NUMBER.search(query):
         return True
+
+    # A bare number is a section reference only when it matches a number that
+    # actually exists in this document. This works across languages:
+    # "section 4", "chapitre 4", "Abschnitt 4", "第4章", "mục 4".
+    section_numbers = {
+        str(section.get("number") or "").strip()
+        for section in sections
+        if str(section.get("number") or "").strip()
+    }
+    for match in _BARE_NUMBER.finditer(query):
+        if match.group(1) in section_numbers:
+            return True
+
     normalized_query = _normalize_text(query)
     for section in sections:
         title = str(section.get("title") or "")
@@ -367,7 +452,7 @@ def _looks_like_section_query(query: str, sections: list[dict]) -> bool:
         candidate = _normalize_text(title_without_number or title)
         # A single generic word ("State", "Memory", "Results") is too weak a
         # signal; require a specific multi-word title.
-        if len(candidate) < 12 or len(candidate.split()) < 2:
+        if len(candidate) < SECTION_QUERY_MIN_TITLE_CHARS or len(candidate.split()) < SECTION_QUERY_MIN_TITLE_WORDS:
             continue
         if candidate in normalized_query:
             return True
@@ -395,7 +480,7 @@ def resolve_section(query: str, title: str, sections: list[dict]) -> list[str]:
     prompt = build_section_route_prompt(title, "\n".join(outline_lines), query)
     try:
         raw = _generate(
-            prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=120
+            prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=MAX_TOKENS["resolve_section"]
         ).strip()
     except Exception as error:
         print(f"resolve_section failed, skipping section filter: {error}")
@@ -405,7 +490,7 @@ def resolve_section(query: str, title: str, sections: list[dict]) -> list[str]:
     return _section_ids_from_response(raw, sections)
 
 
-def grade_documents(question, chunks, max_chars=700):
+def grade_documents(question, chunks, max_chars=GRADE_CHUNK_CHARS):
     listing = []
     for i, c in enumerate(chunks):
         text = (c.get("text") or "")[:max_chars].replace("\n", " ")
@@ -413,7 +498,7 @@ def grade_documents(question, chunks, max_chars=700):
             f"[{i}] {c.get('section_title_clean') or c.get('section_heading', '')} | {text}"
         )
     prompt = build_grade_prompt(question, listing)
-    raw = _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=256)
+    raw = _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=MAX_TOKENS["grade"])
     m = re.search(r'"relevant_indices"\s*:\s*\[([^\]]*)\]', raw)
     if not m: 
         print(f"grade_documents: unparsable response, failing open: {raw[:120]!r}")
@@ -422,7 +507,7 @@ def grade_documents(question, chunks, max_chars=700):
 
 def rewrite_query(question):
     prompt = build_rewrite_prompt(question)
-    return _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=128).strip() or question.strip() or question
+    return _generate(prompt, models=OPENROUTER_UTILITY_MODELS, max_tokens=MAX_TOKENS["rewrite"]).strip() or question.strip() or question
 
 
 if __name__ == "__main__":

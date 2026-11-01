@@ -16,7 +16,15 @@ from pathlib import Path
 
 from qdrant_client.http import models
 
-from app.core.config import INDEX_DIR, QDRANT_COLLECTION
+from app.core.config import (
+    CACHE_HASH_LEN,
+    INDEX_DIR,
+    INSIGHT_MAP_GROUP_CHARS,
+    INSIGHT_SINGLE_PASS_CHARS,
+    MAX_TOKENS,
+    QDRANT_COLLECTION,
+    SCROLL_PAGE_SIZE_LARGE,
+)
 from app.core.prompts import (
     build_insight_map_prompt,
     build_insight_reduce_prompt,
@@ -30,14 +38,14 @@ from app.retrieval.store import get_client
 INSIGHT_DIR = INDEX_DIR / "insights"
 
 # A document whose full text fits here is summarized in a single call.
-SINGLE_PASS_CHARS = 14000
+SINGLE_PASS_CHARS = INSIGHT_SINGLE_PASS_CHARS
 # When map-reducing, chunks are packed into groups of about this size.
-MAP_GROUP_CHARS = 6000
+MAP_GROUP_CHARS = INSIGHT_MAP_GROUP_CHARS
 
 
 def _cache_path(root: str, rel_path: str) -> Path:
-    root_key = hashlib.md5(root.encode("utf-8")).hexdigest()[:8]
-    file_key = hashlib.md5(rel_path.encode("utf-8")).hexdigest()[:8]
+    root_key = hashlib.md5(root.encode("utf-8")).hexdigest()[:CACHE_HASH_LEN]
+    file_key = hashlib.md5(rel_path.encode("utf-8")).hexdigest()[:CACHE_HASH_LEN]
     return INSIGHT_DIR / f"{root_key}_{file_key}.json"
 
 
@@ -68,7 +76,7 @@ def _file_chunks(root: str, rel_path: str) -> list[dict]:
     client = get_client()
     points, _ = client.scroll(
         collection_name=QDRANT_COLLECTION,
-        limit=1000,
+        limit=SCROLL_PAGE_SIZE_LARGE,
         with_payload=True,
         with_vectors=False,
         scroll_filter=qfilter,
@@ -105,14 +113,14 @@ def _compose(title: str, chunks: list[dict]) -> str:
     """One-pass summarize a short document."""
     full_text = "\n\n".join(chunk.get("text", "") for chunk in chunks)
     if len(full_text) <= SINGLE_PASS_CHARS:
-        return _generate(build_insight_single_prompt(title, full_text), max_tokens=900)
+        return _generate(build_insight_single_prompt(title, full_text), max_tokens=MAX_TOKENS["insight_single"])
 
     groups = _group([chunk.get("text", "") for chunk in chunks], MAP_GROUP_CHARS)
     partials = [
-        _generate(build_insight_map_prompt(title, group), max_tokens=400)
+        _generate(build_insight_map_prompt(title, group), max_tokens=MAX_TOKENS["insight_map"])
         for group in groups
     ]
-    return _generate(build_insight_reduce_prompt(title, partials), max_tokens=900)
+    return _generate(build_insight_reduce_prompt(title, partials), max_tokens=MAX_TOKENS["insight_reduce"])
 
 
 def summarize_source(scope: str, rel_path: str, force: bool = False) -> dict:

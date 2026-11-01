@@ -61,24 +61,34 @@ question ─► standalone query ─► ranked chunks ─► (relevant chunks ±
 
 **Processing**
 
-1. `iter_files(root)` walks `data/docs/` recursively and keeps files whose suffix is
-   in `SUPPORTED_EXTENSIONS`; any path containing a hidden segment (`.something`) is
-   skipped.
+1. `snapshot(root)` (`app/indexing/scanner.py`) walks `data/docs/` recursively and
+   keeps files whose suffix is in `SUPPORTED_EXTENSIONS`; any path containing a
+   hidden segment (`.something`) is skipped. Only **metadata** is collected
+   (`rel_path`, `name`, `size`, `mtime_ns`) — file contents are not opened.
    ```python
    SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".json",
                            ".docx", ".pdf", ".html", ".htm"}
    ```
-2. Each surviving file is hashed with SHA-256 and compared against the stored
-   manifest (`data/index/manifest.json`), which maps relative path → content hash and
-   carries an `INDEX_VERSION`.
+2. Metadata is compared against the SQLite **file-state cache**
+   (`data/index/metadata.sqlite3`, table `file_state`), which stores `size`,
+   `mtime_ns`, `content_hash`, `status` and `index_version` per
+   `(scope, rel_path)`.
 3. Three sets are derived:
-   - **changed** — hash differs from the manifest, or the path is new
-   - **deleted** — in the manifest but no longer on disk
-   - **unchanged** — identical hash, fully skipped
-4. The manifest is reset to empty (forcing a full re-index) when the collection was
-   just rebuilt, or when `INDEX_VERSION` was bumped (extraction/chunking logic changed).
+   - **changed** — new path, `size`/`mtime_ns` differs, previous status was
+     `pending`/`error`, or `INDEX_VERSION` changed
+   - **deleted** — cached but no longer on disk
+   - **unchanged** — identical metadata, fully skipped (no hash, no read)
+4. **Hash confirmation:** a file whose mtime/size changed is hashed with SHA-256.
+   If the hash equals the cached one (e.g. `touch`), its metadata is refreshed and
+   it is not re-chunked/re-embedded.
+5. The cache is cleared (forcing a full re-index) when the collection was just
+   rebuilt or `INDEX_VERSION` was bumped.
 
-**Output:** the lists `changed` / `deleted`, and `path_by_rel` (relative path → `Path`).
+**Output:** the lists `changed` / `deleted` and the metadata snapshot. `file_state` is
+the only change-detection state; the old JSON manifest is no longer written or read.
+
+For real-time updates the **watcher** bypasses this scan entirely: it enqueues only
+the changed paths into the debounced background worker (see `INDEXING.md`).
 
 **Design point:** change detection is **path-based**. A file's identity is
 `file_id = md5(relative_path)`, so a rename is seen as delete + add.
@@ -153,7 +163,7 @@ The chunker walks the annotated blocks and tracks the **current heading** (initi
 
 | Incoming block | Processing |
 | --- | --- |
-| `heading` | Flush the body buffered under the previous heading (`emit_body()`), then push a node on the heading stack. The node gets a **materialized path id** (`s1`, `s1.1`, …), a clean title, a parsed section number and a depth. A heading is **never emitted as a chunk by itself** — it becomes the `section_id`/`section_ancestors` (and a clean text prefix) of the chunks that follow. |
+| `heading` | Flush the body buffered under the previous heading (`emit_body()`), then push a node on the heading stack. The node gets a **materialized path id** (`s4`, `s4.1`, …; structural fallbacks `x1`/`s4.x1`), a clean title, a parsed section number and a depth. A heading is **never emitted as a chunk by itself** — it becomes the `section_id`/`section_ancestors` (and a clean text prefix) of the chunks that follow. |
 | `text` / `picture` | Appended to a running `body` buffer. |
 | `table` | Flush the body, then emit **one atomic chunk** that is never split. Caption (author caption, else `table_caption(rows)`) is the primary signal; the nearest heading is fallback context only when no author caption exists. The table shares its section's `section_id`; only `chunk_type=table` and the display-only `section_heading` suffix `(Table)` differ. |
 
@@ -182,7 +192,9 @@ raw_heading, chunk_type, context_header, doc_type, char_count, text` (plus `capt
 - A table is always exactly one chunk; a text run is ≥1 chunk depending on length.
 - A heading with no body produces no chunk of its own, but its node still appears in the
   canonical tree when any descendant chunk carries it in `section_ancestors`.
-- `section_id` is structural and unique; duplicate or unnumbered headings get distinct ids.
+- `section_id` keeps the printed section path when consistent (`s4`, `s4.1`) and
+  falls back to a structural id (`x1`, `s4.x1`) for unnumbered/wrapped headings; duplicate
+  printed paths get a `-2` suffix, so every id is unique.
 - A table shares its section's `section_id`; asking for that section returns prose **and**
   table chunks.
 - The contextual header uses clean titles (no `**`, no synthetic `(Table)` suffix).
@@ -250,7 +262,8 @@ and position come from the chunk record / Qdrant payload, not from the cache.
      the same point instead of duplicating.
 3. Points are upserted in batches. Before re-chunking, all points of a changed/deleted
    file were already deleted by `file_id`, so nothing goes stale.
-4. The manifest is rewritten with the new hashes and `INDEX_VERSION`.
+4. The file-state cache (`metadata.sqlite3`) is rewritten with the new hashes and
+   `INDEX_VERSION`.
 5. **Cache maintenance:** if the cache has grown past
    `live_points * 1.5 + 200`, `prune_cache()` scrolls the collection, collects the
    live `text` values, and drops cache lines no longer referenced.
@@ -262,8 +275,8 @@ vectors_config        = { "dense": VectorParams(size=4096, distance=COSINE) }
 sparse_vectors_config = { "bm25":  SparseVectorParams(modifier=IDF) }
 ```
 
-**Output:** the `docs_local` collection under `output/qdrant_db/`, plus updated
-manifest and cache.
+**Output:** the `docs_local` collection under `output/qdrant_db/`, plus the updated
+metadata cache and embedding cache.
 
 ---
 
@@ -371,12 +384,12 @@ Two independent evaluation stages measure different layers.
 
 | Stage | Reads | Writes / produces |
 | --- | --- | --- |
-| 1 Discover | `data/docs/**`, `data/index/manifest.json` | `changed` / `deleted` sets |
+| 1 Discover | `data/docs/**`, `data/index/metadata.sqlite3` | `changed` / `deleted` sets |
 | 2 Extract | file bytes | ordered blocks |
 | 3 Captions | blocks | annotated blocks (captions, figure filtering) |
 | 4 Chunk | annotated blocks | chunk records |
 | 5 Embed | chunk text, `embeddings_cache.jsonl` | dense vectors, updated cache |
-| 6 Index | vectors + chunk records | `output/qdrant_db/` (`docs_local`), `manifest.json` |
+| 6 Index | vectors + chunk records | `output/qdrant_db/` (`docs_local`), `metadata.sqlite3` |
 | Cache prune | Qdrant payloads, cache | trimmed cache |
 | 7 Retrieve | query, `docs_local` | ranked chunks |
 | 8 Reason | ranked chunks, chat history, web | answer + sources |
@@ -396,9 +409,10 @@ Two independent evaluation stages measure different layers.
 - **The embedding cache is not a chunk store.** It holds no metadata; chunk type is read
   from the Qdrant payload (`chunk_type == "table"`, plus `caption` / `table_number`).
 - **Sections are identified by materialized paths, not heading text.** `section_id`
-  (`s4.1`) and `section_ancestors` are generated at ingestion; `MatchAny` on
-  `section_ancestors` returns a parent's whole subtree. `section_heading` is display /
-  evaluation metadata only and must never be used as a retrieval filter.
+  (`s4.1`; `x`/`-2` fallbacks for unnumbered or duplicate paths) and
+  `section_ancestors` are generated at ingestion; `MatchAny` on `section_ancestors`
+  returns a parent's whole subtree. `section_heading` is display / evaluation metadata
+  only and must never be used as a retrieval filter.
 - **The Document Card is the outline source of truth.** `outline_tree` is refreshed by
   `POST /api/sync`; chat reads it from the RAM-cached registry and does not scroll Qdrant
   to build an outline.

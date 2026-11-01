@@ -21,6 +21,10 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 
 > **[PIPELINE.md](PIPELINE.md)** records the pipeline stages and how each one
 > processes data (transformations, decisions, inputs/outputs).
+>
+> **[INDEXING.md](INDEXING.md)** documents the incremental indexing subsystem:
+> metadata-only scanning, the SQLite file-state cache, the debounced background
+> worker, real-time folder watching and on-demand content reads.
 
 ---
 
@@ -59,7 +63,7 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 .
 ├── app/
 │   ├── core/
-│   │   ├── config.py          # all constants: crawl scope, chunk sizes, models, paths
+│   │   ├── config/            # typed settings (pydantic-settings), one file per group
 │   │   ├── models.py          # TypedDicts for chunks, embeddings, retrieval, RAG state
 │   │   └── tracing.py         # optional Langfuse helpers (no-op when disabled)
 │   ├── ingestion/
@@ -141,14 +145,40 @@ Create a `.env` in the project root. Only the keys for the providers you use are
 
 ### Pipeline constants
 
-Tunable in `app/core/config.py`:
+Configuration is a typed, nested settings tree in **`app/core/config/`**
+(`pydantic-settings`), split one file per subsystem. New code reads it directly:
 
-- Crawl scope: `CRAWL_ROOTS`, `SITEMAP_URLS`, `ALLOWED_DOMAINS`,
-  `ALLOWED_PATH_PREFIXES`, `EXCLUDED_PATH_HINTS`, `MAX_PAGES`
-- Chunking: `CHUNK_TARGET_CHARS` (1200), `CHUNK_MAX_CHARS` (1800)
-- Retrieval: `DEFAULT_TOP_K` (5), `EMBEDDING_DIM` (3072), `QDRANT_PATH`,
-  `QDRANT_COLLECTION` (`doc_chunks`)
-- Models: `DEFAULT_MODEL` (`gemini-3.5-flash`, used for grounded web search)
+    from app.core.config import settings
+    settings.retrieval.default_top_k
+
+Every value can be overridden without touching code via the **`DOCINTEL_`**
+environment or `.env`, nesting groups with a double underscore:
+
+    DOCINTEL_RETRIEVAL__DEFAULT_TOP_K=10 uvicorn app.server.main:app --port 8756
+    DOCINTEL_EMBEDDINGS__RETRYABLE_STATUS_CODES=429,500,503
+
+Key groups (see each file for the full list and defaults):
+
+- `paths.py`: `data_dir`, `docs_dir`, `index_dir`, `state_path`
+- `ingestion.py`: `chunk_target_chars` (1200), `chunk_max_chars` (1800),
+  `index_version`, `upsert_batch_size`, `breadcrumb_max_depth`, ...
+- `embeddings.py`: `provider`, `model_name`, `openrouter_model`, `dim`, plus
+  retry (`max_retries`, `base_delay`, `request_timeout`, ...)
+- `store.py`: `qdrant_url`, `qdrant_path`, `collection` (`docs_local`),
+  `hybrid_prefetch_limit`, `scroll_page_size`, ...
+- `retrieval.py`: `default_top_k` (5), `ask_top_k` (8), `reference_penalty`, ...
+- `generation.py`: `default_model` (`gemini-3.5-flash`, grounded web search),
+  `generation_provider`, model chains, retry/cooldown, token budgets
+  (`MAX_TOKENS`), history windows
+- `graph.py`: reasoning-graph caps and gates (`max_section_docs`,
+  `max_section_chunks`, `grade_skip_threshold`, `max_rewrites`, ...)
+- `capabilities.py`, `state.py`, `desktop.py`: card/insight/suggest/workspace
+  budgets, session limits, and window sizes
+
+The old flat imports (`from app.core.config import DEFAULT_TOP_K`) still work
+through a compatibility facade in `config/__init__.py`; prefer `settings.*`.
+
+Naming convention: `DOCINTEL_<GROUP>__<FIELD>`.
 
 ---
 
@@ -203,6 +233,32 @@ that rewrite changes the query the CLI prints it as `↳ Truy vấn độc lập
 | --- | --- |
 | `exit` / `quit` / `:q` | Leave the CLI |
 | `:reset` / `reset` / `clear` | Clear conversation history and start a new topic |
+| `:web` | Toggle web search (Google Search grounding) on/off |
+| `:think` | Toggle thinking mode (model reasoning) on/off |
+
+### Answer options (web + CLI + API)
+
+Two per-question options are exposed on every surface; both default to **off**:
+
+| Option | API field | Effect |
+| --- | --- | --- |
+| **Web search** | `allow_external` | When local retrieval is weak, allow a Gemini Google-Search-grounded lookup instead of declining. Off keeps answers strictly local. |
+| **Think** | `thinking` | Let the answer model reason before answering. Slower and more expensive, but better on multi-step/comparison questions. Router/grader helpers stay non-thinking. |
+
+In the web UI, the **Tools ▾** button (left of the send arrow) opens a menu with
+**Web search** and **Think**. The button label shows the active modes
+(`Web + Think`), and the choice is remembered in `localStorage` and sent with
+each request:
+
+```bash
+curl -X POST http://127.0.0.1:8756/api/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"compare the two papers","allow_external":true,"thinking":true}'
+```
+
+Thinking mode uses the larger `answer_thinking` / `no_context_thinking` token
+budgets (see `app/core/config/generation.py`), because hidden reasoning tokens
+count against the completion.
 
 ### 4. Benchmark retrieval
 

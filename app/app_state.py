@@ -25,15 +25,15 @@ import os
 import threading
 import time
 import uuid
-from pathlib import Path
 
+from app.core.config import (
+    DEFAULT_CONVERSATION,
+    MAX_CONVERSATIONS,
+    MAX_RECENT,
+    MAX_SESSION_MESSAGES,
+    STATE_PATH,
+)
 from app.core.scope import normalize_root
-
-STATE_PATH = Path("data/app_state.json")
-MAX_RECENT = 8
-MAX_SESSION_MESSAGES = 20
-MAX_CONVERSATIONS = 20
-DEFAULT_CONVERSATION = "default"
 
 # Serializes load -> modify -> save for every writer in this process.
 _LOCK = threading.RLock()
@@ -185,10 +185,6 @@ def get_scope() -> str | None:
     return load().get("scope")
 
 
-def get_recent() -> list[str]:
-    return load().get("recent", [])
-
-
 # --------------------------------------------------------------------------- #
 # Conversations
 # --------------------------------------------------------------------------- #
@@ -242,12 +238,6 @@ def append_turns(
         return conv["messages"]
 
     return _mutate(apply)
-
-
-def append_turn(
-    role: str, content: str, conversation_id: str = DEFAULT_CONVERSATION
-) -> list[dict]:
-    return append_turns(conversation_id, [(role, content)])
 
 
 def clear_session(conversation_id: str = DEFAULT_CONVERSATION) -> None:

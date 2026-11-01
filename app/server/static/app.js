@@ -49,6 +49,21 @@ const CONV_KEY = 'docintel_conversation_id';
 let conversationId = '';
 try { conversationId = localStorage.getItem(CONV_KEY) || ''; } catch { conversationId = ''; }
 
+// Per-user answer options, remembered across reloads. The composer chips read
+// and write these, and every request carries the current value explicitly.
+const PREF_EXTERNAL = 'docintel_external_search';
+const PREF_THINKING = 'docintel_thinking';
+
+function readPref(key) {
+  try { return localStorage.getItem(key) === '1'; } catch { return false; }
+}
+function writePref(key, on) {
+  try { localStorage.setItem(key, on ? '1' : '0'); } catch { /* private mode */ }
+}
+
+let allowExternal = readPref(PREF_EXTERNAL);
+let thinkingMode = readPref(PREF_THINKING);
+
 function storeConversation(id) {
   conversationId = id;
   try { localStorage.setItem(CONV_KEY, id); } catch { /* private mode */ }
@@ -243,7 +258,15 @@ async function send(btn) {
   try {
     await ensureConversation();
     // The server owns the selection (excluded_docs); the flag tells it to apply it.
-    const body = { query, use_selection: true, conversation_id: conversationId };
+    // The two answer options are explicit per request, so the user can change
+    // them from message to message without touching any stored state.
+    const body = {
+      query,
+      use_selection: true,
+      conversation_id: conversationId,
+      allow_external: allowExternal,
+      thinking: thinkingMode,
+    };
     const r = await api('/api/ask', { method: 'POST', body });
     thinking.remove();
     addBot(r.answer || '(no answer)', false, r.sources || []);
@@ -379,7 +402,6 @@ async function setAllSources(all) {
 async function loadState() {
   const s = await api('/api/state' + convQuery());
   $('state').textContent = 'scope: ' + (s.scope || '(none)');
-  if (s.scope && !$('scope').value) $('scope').value = s.scope;
   renderWorkingSet(s.active_docs || []);
   excludedSet = new Set(s.excluded_docs || []);
 }
@@ -388,10 +410,20 @@ async function useFolder(btn) {
   const path = $('scope').value.trim();
   if (!path) { status('Enter a folder path', true); return false; }
   return run(btn, 'Folder selected', async () => {
-    await api('/api/scope', {
-      method: 'POST',
-      body: { path, conversation_id: conversationId },
-    });
+    let state;
+    try {
+      state = await api('/api/scope', {
+        method: 'POST',
+        body: { path, conversation_id: conversationId },
+      });
+    } catch (e) {
+      // Keep the error visible (the status toast disappears quickly).
+      $('state').textContent = e.message || 'Folder not found';
+      throw e;
+    }
+    // Show the canonical path the server actually uses (e.g. a Windows path
+    // becomes /mnt/c/... when the server runs in WSL).
+    if (state && state.scope) $('scope').value = state.scope;
     // A new folder starts a fresh context for this conversation.
     $('msglist').innerHTML = '';
     renderWorkingSet([]);
@@ -524,6 +556,33 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnSearch = $('btnSearch');
   const btnInsight = $('btnInsight');
   const aq = $('aq');
+
+  // Gemini-style mode chips: two visible toggles that stay in sync with the
+  // saved preference. No popup, so there is nothing to open/close incorrectly.
+  const bindModeChip = (id, get, set) => {
+    const btn = $(id);
+    if (!btn) return;
+    const render = () => {
+      const on = get();
+      btn.setAttribute('aria-pressed', String(on));
+      btn.classList.toggle('on', on);
+    };
+    render();
+    btn.addEventListener('click', () => {
+      set(!get());
+      render();
+    });
+  };
+  bindModeChip(
+    'btnExternal',
+    () => allowExternal,
+    (on) => { allowExternal = on; writePref(PREF_EXTERNAL, on); },
+  );
+  bindModeChip(
+    'btnThinking',
+    () => thinkingMode,
+    (on) => { thinkingMode = on; writePref(PREF_THINKING, on); },
+  );
 
   $('composer').addEventListener('submit', (e) => { e.preventDefault(); send(btnAsk); });
   aq.addEventListener('input', () => autoGrow(aq));

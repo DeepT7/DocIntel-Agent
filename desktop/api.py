@@ -7,8 +7,6 @@ index are shared by construction.
 This module must not touch Qdrant directly; it only calls ``app.capabilities``.
 """
 
-from pathlib import Path
-
 import pyperclip
 
 from app import app_state
@@ -16,9 +14,9 @@ from app.capabilities.search import search as cap_search
 from app.capabilities.sources import list_sources as cap_sources
 from app.capabilities.suggest import suggest as cap_suggest
 from app.capabilities.sync import sync as cap_sync
-from app.core.scope import normalize_root
+from app.core.config import DEFAULT_TOP_K, DESKTOP_MAX_CLIPBOARD
 
-MAX_CLIPBOARD = 4000
+MAX_CLIPBOARD = DESKTOP_MAX_CLIPBOARD
 
 
 class Api:
@@ -61,7 +59,7 @@ class Api:
         return cap_sources(scope) if scope else []
 
     # ------------------------------------------------------------------ query
-    def search(self, query: str, top_k: int = 5) -> list[dict]:
+    def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[dict]:
         scope = app_state.get_scope()
         if not scope:
             return []

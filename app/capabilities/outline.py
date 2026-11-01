@@ -6,6 +6,7 @@ searching: list its canonical section tree, then read a section by its
 materialized-path id (``s4``, ``s4.1``).
 """
 
+from app.core.config import SECTION_CHUNKS_LIMIT
 from app.retrieval.retrieve import document_outline, section_chunks
 
 
@@ -18,7 +19,7 @@ def section(
     scope: str,
     path: str,
     section_ids: str | list[str],
-    limit: int = 20,
+    limit: int = SECTION_CHUNKS_LIMIT,
     include_descendants: bool = True,
 ) -> list[dict]:
     """Every chunk of one or more sections, in reading order."""

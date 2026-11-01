@@ -16,18 +16,22 @@ from google.genai import types
 import requests
 
 from app.core.config import (
+    EMBED_BASE_DELAY,
+    EMBED_MAX_RETRIES,
+    EMBED_REQUEST_TIMEOUT,
     EMBEDDING_MODEL,
     EMBEDDING_PROVIDER,
     OPENROUTER_BASE_URL,
     OPENROUTER_EMBEDDING_MODEL,
+    RETRYABLE_STATUS_CODES,
 )
 
 load_dotenv()
 
-BATCH_SIZE = 50
-MAX_RETRIES = 6
-BASE_DELAY = 5.0
-TEXTS_PER_MINUTE = 100  # Gemini free-tier embed quota (counted per text, not per request)
+# Re-exported under the original names so the rest of this module does not
+# change; the canonical values live in config.
+MAX_RETRIES = EMBED_MAX_RETRIES
+BASE_DELAY = EMBED_BASE_DELAY
 
 _client = None
 
@@ -45,7 +49,7 @@ def _get_client() -> genai.Client:
 
 def _is_retryable(error: Exception) -> bool:
     status = getattr(error, "status_code", None) or getattr(error, "code", None)
-    if status in (429, 500, 502, 503, 504):
+    if status in RETRYABLE_STATUS_CODES:
         return True
     text = str(error).upper()
     return any(token in text for token in ("RESOURCE_EXHAUSTED", "429", "UNAVAILABLE"))
@@ -93,8 +97,8 @@ def _embed_batch_openrouter(
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-            if response.status_code in (429, 500, 502, 503, 504, 529):
+            response = requests.post(url, headers=headers, json=payload, timeout=EMBED_REQUEST_TIMEOUT)
+            if response.status_code in RETRYABLE_STATUS_CODES:
                 raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
             response.raise_for_status()
             data = response.json().get("data", [])
@@ -146,20 +150,3 @@ def load_cached_embeddings(path: Path, model: str | None = None) -> dict[str, li
             if text and embedding and record.get("model") == model:
                 cached[text] = embedding
     return cached
-
-
-_sent_window: list[tuple[float, int]] = []
-
-
-def wait_for_quota(count: int, limit: int = TEXTS_PER_MINUTE, window: float = 60.0) -> None:
-    """Block until ``count`` more texts fit inside the rolling-minute quota."""
-    while True:
-        now = time.time()
-        _sent_window[:] = [(t, n) for t, n in _sent_window if now - t < window]
-        used = sum(n for _, n in _sent_window)
-        if used + count <= limit:
-            _sent_window.append((now, count))
-            return
-        sleep_for = window - (now - _sent_window[0][0]) + 1.0
-        print(f"pacing: sleep {sleep_for:.0f}s (used {used}/{limit} in last minute)")
-        time.sleep(sleep_for)

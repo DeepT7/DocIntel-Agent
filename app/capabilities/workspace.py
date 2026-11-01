@@ -7,11 +7,11 @@ content. Kept separate from retrieval on purpose.
 
 from pathlib import Path
 
-from app.core.config import SUPPORTED_EXTENSIONS
+from app.core.config import SUPPORTED_EXTENSIONS, WORKSPACE_MAX_FILES
 from app.core.scope import normalize_root
 
 
-def list_files(scope: str, limit: int = 300) -> list[str]:
+def list_files(scope: str, limit: int = WORKSPACE_MAX_FILES) -> list[str]:
     """Relative paths of supported files under ``scope``, sorted."""
     if not scope:
         return []

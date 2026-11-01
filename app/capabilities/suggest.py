@@ -6,11 +6,11 @@ cites those excerpts.
 """
 
 from app.capabilities.search import search
-from app.core.config import DEFAULT_TOP_K
+from app.core.config import DEFAULT_TOP_K, MAX_TOKENS, SUGGEST_MAX_CLIPBOARD_CHARS
 from app.core.prompts import build_suggest_prompt
 from app.reasoning.answer import format_context, _generate
 
-MAX_CLIPBOARD_CHARS = 2000
+MAX_CLIPBOARD_CHARS = SUGGEST_MAX_CLIPBOARD_CHARS
 
 
 def suggest(
@@ -35,5 +35,5 @@ def suggest(
         clipboard=clipboard or "(empty)",
         context=context,
     )
-    suggestion = _generate(prompt, max_tokens=800)
+    suggestion = _generate(prompt, max_tokens=MAX_TOKENS["suggest"])
     return {"suggestion": suggestion, "sources": results}

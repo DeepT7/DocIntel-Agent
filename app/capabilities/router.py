@@ -24,7 +24,12 @@ instead of silently searching the whole folder.
 import json
 import re
 
-from app.core.config import OPENROUTER_UTILITY_MODELS
+from app.core.config import (
+    HISTORY_MAX_MESSAGES_ROUTE,
+    MAX_TOKENS,
+    OPENROUTER_UTILITY_MODELS,
+    ROUTE_MAX_QUERIES,
+)
 from app.core.prompts import build_turn_router_prompt
 from app.reasoning.answer import _generate, classify_intent, format_history
 
@@ -107,12 +112,12 @@ def route(
         raw = _generate(
             build_turn_router_prompt(
                 query,
-                format_history(history or [], max_messages=4),
+                format_history(history or [], max_messages=HISTORY_MAX_MESSAGES_ROUTE),
                 cards,
                 open_cards,
             ),
             models=OPENROUTER_UTILITY_MODELS,
-            max_tokens=600,
+            max_tokens=MAX_TOKENS["route"],
         )
     except Exception as error:
         print(f"route failed, searching everything: {error}")
@@ -143,7 +148,7 @@ def route(
             str(item).strip()
             for item in (data.get("rewritten_queries") or [])
             if str(item).strip()
-        ][:3]
+        ][:ROUTE_MAX_QUERIES]
 
     return {
         "intent": intent,

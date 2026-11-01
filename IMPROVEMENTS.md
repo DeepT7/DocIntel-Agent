@@ -10,9 +10,11 @@ Các điểm cần sửa, ghi lại để sau xử lý: **tình huống** + **�
 
 **Đã làm:**
 
-- Ingestion sinh **materialized path** cho từng chunk: `section_id` (`s4`, `s4.1`),
-  `section_ancestors`, `section_titles`, `section_depths`, `section_number`,
-  `section_title_clean`, `raw_heading`, `chunk_type`. `INDEX_VERSION` → `12`.
+- Ingestion sinh **materialized path** cho từng chunk: `section_id` (`s4`, `s4.1`;
+  fallback `x1`/`s4.x1`), `section_ancestors`, `section_titles`, `section_depths`,
+  `section_number`, `section_title_clean`, `raw_heading`, `chunk_type`. ID giữ số mục in
+  khi nhất quán với cha; trùng đường dẫn thêm `-2`. `INDEX_VERSION` → `13`,
+  `OUTLINE_VERSION` → `2`.
 - Bảng dùng **cùng `section_id`** với mục chứa nó; hỏi mục đó trả cả text + bảng.
 - `section_chunks` lọc `section_ancestors` bằng `MatchAny`:
   - mục con → đúng nhánh;
@@ -98,18 +100,22 @@ Các điểm cần sửa, ghi lại để sau xử lý: **tình huống** + **�
 
 ---
 
-## IMP-014 — Router chưa map sub-query ↔ tài liệu khi so sánh
+## IMP-014 — ĐÃ SỬA (best-effort): map sub-query ↔ tài liệu khi so sánh
 
-**File:** `app/capabilities/router.py`, `app/reasoning/rag_graph.py` (`retrieve_node`)
+**File:** `app/reasoning/rag_graph.py` (`retrieve_node`)
 
-**Tình huống:** `rewritten_queries` chỉ là danh sách câu, không nói câu nào thuộc tài liệu nào.
-`retrieve_node` resolve section cho từng `doc_path` bằng **query gốc**. Với câu
-"so sánh mục 4 của bài A với mục 3 của bài B", resolver có thể trả `[]` cho cả hai vì
-query gốc nhắc cả hai bài; kết quả là rơi về vector search (vẫn trả lời được nhưng không
-khoá đúng mục).
+**Đã làm:**
 
-**Hướng sửa:** router trả thêm map `{doc_id: [query…]}` (hoặc mỗi query kèm `doc_ids`);
-`retrieve_node` resolve section bằng đúng sub-query của từng tài liệu. Vẫn giữ cap 3 tài liệu.
+- Nếu `len(rewritten_queries) == len(doc_paths)`, các query **khác nhau**, và mỗi query
+  **không nhắc tài liệu khác** → dùng từng query cho từng tài liệu theo thứ tự.
+- Nếu router trả query trùng/mixed (đã gặp), fallback: lấy các **số mục theo đúng thứ tự
+  xuất hiện** trong câu gốc (`4`, `3`) và ghép với `doc_paths` theo thứ tự
+  (`section 4` → tài liệu 1, `section 3` → tài liệu 2).
+- Nếu câu chỉ nhắc **một** số mục → dùng cùng query cho mọi tài liệu (so sánh cùng mục).
+- Nếu có nhiều số mục nhưng không khớp số tài liệu → **không đoán**, fallback vector search.
+
+**Còn lại:** câu so sánh không có số mục và không khớp title (chỉ dùng từ đồng nghĩa) có thể
+không resolve được nếu router trả query mixed; khi đó vẫn fallback vector search.
 
 ---
 
@@ -136,3 +142,24 @@ Câu trả lời có thể thiếu phần cuối.
 
 **Hướng sửa:** tăng cap theo ngân sách token của model; hoặc lấy toàn bộ mục rồi chọn
 top-N chunk theo relevance trong nội bộ mục thay vì cắt thô theo thứ tự.
+
+---
+
+## IMP-017 — Cross-language synonym không có số mục / title
+
+**File:** `app/reasoning/answer.py` (`_looks_like_section_query`)
+
+**Tình huống:** gate đã độc lập ngôn ngữ với **số mục** (`4.1`, `chapitre 4`, `Abschnitt 4`,
+`第4章`, `4장`) và **title nhiều từ** của chính tài liệu. Nhưng câu chỉ dùng từ đồng nghĩa
+ở ngôn ngữ khác, không có số và không khớp title (ví dụ tài liệu tiếng Anh có mục
+"3 Methodology", người dùng hỏi "la méthodologie"), sẽ **không gọi resolver** → trả lời
+bằng vector search, không khoá mục.
+
+**Đã giảm false positive:** resolver trả thêm `is_section_request`. Các câu
+`5.2 seconds`, `version 2.0`, `12%`, `What is the cross-section area?` → `false` và
+**không lock**; `section 5.2` → `s5.2`. Gate cũng không còn match `section` trong
+`cross-section` / `sectional`.
+
+**Hướng sửa (nếu cần):** dùng semantic similarity giữa query và title các mục (embedding
+đã có) làm tín hiệu gate; hoặc gọi resolver không điều kiện cho chat 1 tài liệu và thêm
+post-check để tránh false positive.

@@ -20,12 +20,16 @@ Instead, ingestion stores a **materialized path** per chunk::
     section_titles:    ["4 Experiments", "4.1 Setup"]
     section_depths:    [1, 2]
 
-``section_id`` is structural (``s1``, ``s1.1``, ``s1.1.2``): it is generated
-from the tree position, so it is unique and stable even when heading text is
-duplicated or unnumbered. A query for ``s4`` matches every chunk whose
-``section_ancestors`` contains ``s4`` -- i.e. the whole subtree. A query for
-``s4.1`` matches just that branch, including its table chunks because tables
-share their section's id.
+``section_id`` keeps the document's printed section number when it is
+consistent with the parent path (``4`` -> ``s4``, ``4.1`` -> ``s4.1``).
+Unnumbered headings and numbered list items under a different wrapper get a
+structural fallback (``x1``, ``s4.x1``, ``sF.x1``); duplicate printed paths get
+a ``-2`` suffix. This keeps the intuitive ``s4.1`` id while remaining unique and
+stable even when heading text is duplicated or unnumbered.
+
+A query for ``s4`` matches every chunk whose ``section_ancestors`` contains
+``s4`` -- i.e. the whole subtree. A query for ``s4.1`` matches just that branch,
+including its table chunks because tables share their section's id.
 
 The Document Card stores the same tree as ``outline_tree``. Retrieval reads it
 from the card (RAM-cached) instead of scrolling Qdrant on every turn.
@@ -35,9 +39,9 @@ from __future__ import annotations
 
 import re
 
-# Bump when the tree shape or metadata changes; cards without the current
-# version are rebuilt from Qdrant during sync.
-OUTLINE_VERSION = 1
+# Bump OUTLINE_VERSION (app/core/config/ingestion.py) when the tree shape or
+# metadata changes; cards without the current version are rebuilt from Qdrant
+# during sync.
 
 _MARKDOWN_MARKS = re.compile(r"\*+")
 _WHITESPACE = re.compile(r"\s+")
@@ -152,11 +156,6 @@ def flatten_sections(tree: list[dict]) -> list[dict]:
 
     walk(tree or [])
     return flat
-
-
-def outline_titles(tree: list[dict]) -> list[str]:
-    """Flat list of clean section titles, in reading order."""
-    return [item["title"] for item in flatten_sections(tree) if item.get("title")]
 
 
 def render_outline(tree: list[dict]) -> str:
