@@ -29,6 +29,7 @@ from app.core.config import (
     SECTION_CHUNKS_LIMIT,
     SPARSE_MODEL,
     SPARSE_VECTOR_NAME,
+    TABLE_LOOKUP_LIMIT,
 )
 from app.core.scope import normalize_root
 from app.retrieval.embeddings import embed_texts
@@ -133,6 +134,10 @@ def _to_result(payload: dict, score: float, semantic: float, keyword: float) -> 
         "text": payload.get("text"),
         "caption": payload.get("caption"),
         "table_number": payload.get("table_number"),
+        "asset_id": payload.get("asset_id"),
+        "asset_path": payload.get("asset_path"),
+        "headers": payload.get("headers"),
+        "row_count": payload.get("row_count"),
     }
 
 
@@ -284,6 +289,61 @@ def section_chunks(
             return int(chunk_id.rsplit(":", 1)[1])
         except (IndexError, ValueError):
             return 0
+
+    return [
+        _to_result(point.payload or {}, 0.0, 0.0, 0.0)
+        for point in sorted(points, key=order)
+    ]
+
+
+def table_chunks(
+    scope: str | None,
+    table_numbers: list[str],
+    paths: "str | list[str] | None" = None,
+    limit: int = TABLE_LOOKUP_LIMIT,
+) -> list[dict]:
+    """Table stubs whose ``table_number`` matches an explicit reference.
+
+    This is a payload filter, not a text search, so "Table 2" always retrieves
+    the chunks captioned "Table 2" even when the query wording does not embed
+    well. Case variants are accepted so "table a.1" matches a stored "A.1".
+    """
+    numbers = [number for number in dict.fromkeys(table_numbers or []) if number]
+    if not numbers:
+        return []
+
+    must = [
+        models.FieldCondition(
+            key="chunk_type", match=models.MatchValue(value="table_stub")
+        ),
+        models.FieldCondition(key="table_number", match=models.MatchAny(any=numbers)),
+    ]
+    path_cond = _path_condition(paths)
+    if path_cond is not None:
+        must.append(path_cond)
+    if scope:
+        must.append(
+            models.FieldCondition(
+                key="root", match=models.MatchValue(value=normalize_root(scope))
+            )
+        )
+
+    points, _ = get_client().scroll(
+        collection_name=COLLECTION_NAME,
+        limit=limit,
+        with_payload=True,
+        with_vectors=False,
+        scroll_filter=models.Filter(must=must),
+    )
+
+    def order(point) -> tuple[str, int]:
+        payload = point.payload or {}
+        chunk_id = payload.get("chunk_id", "")
+        try:
+            sequence = int(chunk_id.rsplit(":", 1)[1])
+        except (IndexError, ValueError):
+            sequence = 0
+        return (payload.get("path") or "", sequence)
 
     return [
         _to_result(point.payload or {}, 0.0, 0.0, 0.0)

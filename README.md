@@ -1,15 +1,15 @@
 # DocIntel Agent
 
-A documentation-intelligence RAG agent over the **LangChain / LangGraph Python docs**.
+A local-document intelligence RAG agent for PDF, Office, HTML, Markdown and text files.
 
-It crawls the official docs, turns every page into structured sections and context-rich
-chunks, embeds them into a local Qdrant index, and answers questions through a
-LangGraph state machine that combines dense + keyword retrieval with an optional
-grounded web-search fallback.
+It converts every supported document to canonical Markdown, turns it into structured
+sections and context-rich chunks, embeds them into a local Qdrant index, and answers
+questions through a LangGraph state machine that combines dense + keyword retrieval
+with an optional grounded web-search fallback.
 
 ```
-LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
-                                                               │
+data/docs (PDF/DOCX/PPTX/HTML/MD/TXT)  →  canonical Markdown  →  blocks  →  chunks  →  embed  →  Qdrant
+                                                                                              │
        question + chat history  →  condense  →  retrieve  →  judge ────┤
                                                           │      │
                                                 (good)    │      │ (weak)
@@ -30,14 +30,18 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 
 ## Features
 
-- **Sitemap-first crawler** — discovers allowed LangChain/LangGraph pages from
-  `sitemap.xml`, then follows in-page links up to `MAX_PAGES`.
-- **Structure-aware cleaning** — extracts headings, paragraphs, code blocks, tables,
-  links and breadcrumbs into a versioned JSON schema, stripping nav/scripts/chat UI.
-- **Context-prefixed chunking** — every chunk carries title + breadcrumbs + section
-  heading so retrieved text is self-describing.
-- **Document graph** — builds a `doc_graph.json` of `discovered_from`,
-  `path_parent`, and `links_to` edges between pages.
+- **Canonical-Markdown ingestion** — MarkItDown converts `.docx`, `.pptx`, `.html`
+  and text, pymupdf4llm converts `.pdf`, and `.md` is already canonical; one shared
+  Markdown parser then preserves headings, lists, code fences and tables.
+- **Smart asset extraction** — PDF picture regions are rendered with PyMuPDF and
+  Office media is read from the ZIP container; tiny icons, logos, rules, blank
+  blocks and repeated template images are filtered out before storage.
+- **Structure-aware chunking** — every chunk carries title + breadcrumbs + section
+  heading so retrieved text is self-describing; tables stay atomic with captions.
+- **Incremental indexing** — metadata-only scan, content-hash confirmation, exact-text
+  embedding cache, debounced watcher; only changed files are re-chunked.
+- **Document cards & outlines** — one cached card per file (title, summary, keywords,
+  canonical section tree) so chat can resolve document/section references.
 - **Hybrid retrieval** — dense vector search (Qdrant) fused with a BM25 keyword
   signal (0.7 semantic / 0.3 keyword).
 - **Grounded fallback** — when internal retrieval is weak, the graph queries Google
@@ -65,43 +69,47 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 │   ├── core/
 │   │   ├── config/            # typed settings (pydantic-settings), one file per group
 │   │   ├── models.py          # TypedDicts for chunks, embeddings, retrieval, RAG state
+│   │   ├── prompts.py         # prompt templates
+│   │   ├── sections.py        # section-tree helpers
 │   │   └── tracing.py         # optional Langfuse helpers (no-op when disabled)
 │   ├── ingestion/
-│   │   ├── discover.py        # URL normalization, classification, link extraction
-│   │   ├── crawl.py           # sitemap discovery + BFS crawl → data/raw/
-│   │   ├── clean.py           # HTML → structured document JSON → data/cleaned/
-│   │   ├── chunk.py           # sections → chunks → data/chunks/
-│   │   └── build_doc_graph.py # inter-document link graph → data/graph/
+│   │   ├── extract.py         # any supported file -> canonical Markdown -> blocks
+│   │   ├── assets.py          # smart visual-asset extraction + filtering
+│   │   ├── chunking.py        # blocks -> section-aware chunks
+│   │   ├── identity.py        # stable file/chunk ids + content hashes
+│   │   ├── qdrant_index.py    # collection schema, embedding cache, upsert/delete
+│   │   ├── sync.py            # metadata-first incremental folder sync
+│   │   └── folder.py          # CLI / public ingestion entry point
+│   ├── indexing/
+│   │   ├── scanner.py         # metadata-only folder scan
+│   │   ├── metadata.py        # SQLite file-state cache
+│   │   ├── watcher.py         # real-time folder watcher (polling fallback)
+│   │   ├── worker.py          # debounced background index queue
+│   │   ├── pipeline.py        # watcher batch -> index writer
+│   │   ├── manager.py         # per-scope watcher/indexer lifecycle
+│   │   └── content.py         # on-demand raw file reads
 │   ├── retrieval/
-│   │   ├── embed_chunks.py    # embed corpus (incremental) + upsert into Qdrant
+│   │   ├── embeddings.py      # provider-agnostic embeddings + cache
+│   │   ├── store.py           # embedded/local Qdrant client
 │   │   └── retrieve.py        # vector_search + hybrid_search
 │   ├── reasoning/
 │   │   ├── answer.py          # prompt building, generation, follow-up condensing
 │   │   └── rag_graph.py       # LangGraph pipeline + interactive Rich CLI
-│   └── evaluation/
-│       ├── run_eval.py        # retrieval benchmark over the gold question set
-│       └── answer_eval.py     # answer-level evaluation with an LLM-as-judge
+│   ├── capabilities/          # HTTP capabilities: ask/search/outline/sync/registry
+│   ├── evaluation/
+│   │   ├── run_eval.py        # retrieval benchmark over the gold question set
+│   │   └── answer_eval.py     # answer-level evaluation with an LLM-as-judge
+│   └── server/                # FastAPI API + static browser UI
+├── desktop/                   # optional two-window desktop shell
 ├── data/
-│   ├── raw/                   # crawled HTML + metadata JSON (keyed by md5 of URL)
-│   ├── cleaned/               # structured documents
-│   ├── chunks/                # per-document chunks + corpus.jsonl + manifest.json
-│   ├── embeddings/            # corpus_embeddings.jsonl + manifest.json
-│   ├── graph/                 # doc_graph.json
-│   ├── eval/questions.json    # 49 hand-curated gold questions
-│   └── samples/               # sample images for the scratch demos
-├── output/
-│   ├── qdrant_db/             # local Qdrant storage
-│   ├── eval_report.json       # latest retrieval benchmark report
-│   ├── eval_cache.json        # cached retrieval results
-│   └── answer_eval/           # cached answers, judgements, and report
-├── scratch/                   # standalone learning/demo scripts (not part of the pipeline)
-│   ├── core_chatbot.py        # raw Gemini text / multimodal / image demos
-│   └── langgraph_simple.py    # minimal single-node LangGraph example
+│   ├── docs/                  # source documents (PDF/DOCX/PPTX/HTML/MD/TXT)
+│   ├── eval/questions.json    # hand-curated gold questions
+│   └── index/                 # metadata.sqlite3, embedding cache, registry/insights, assets/
+├── output/                    # local Qdrant storage + evaluation reports
+├── tests/
 ├── requirements.txt
 └── .gitignore
 ```
-
-> `scratch/` holds standalone learning/demo scripts. They are not part of the RAG pipeline.
 
 ---
 
@@ -114,10 +122,7 @@ LangChain docs  →  crawl  →  clean  →  chunk  →  embed  →  Qdrant
 Install dependencies:
 
 ```bash
-pip install requests beautifulsoup4 lxml python-dotenv \
-            google-genai qdrant-client rank-bm25 langgraph rich
-# optional
-pip install langfuse
+pip install -r requirements.txt
 ```
 
 ---
@@ -161,7 +166,9 @@ Key groups (see each file for the full list and defaults):
 
 - `paths.py`: `data_dir`, `docs_dir`, `index_dir`, `state_path`
 - `ingestion.py`: `chunk_target_chars` (1200), `chunk_max_chars` (1800),
-  `index_version`, `upsert_batch_size`, `breadcrumb_max_depth`, ...
+  `index_version`, `upsert_batch_size`, `breadcrumb_max_depth`, plus asset
+  filters (`asset_min_width`, `asset_max_aspect_ratio`, `asset_min_ink_ratio`,
+  `asset_pdf_dpi`, `asset_office_min_display`, `asset_repeat_count`, ...)
 - `embeddings.py`: `provider`, `model_name`, `openrouter_model`, `dim`, plus
   retry (`max_retries`, `base_delay`, `request_timeout`, ...)
 - `store.py`: `qdrant_url`, `qdrant_path`, `collection` (`docs_local`),
@@ -197,28 +204,29 @@ Run every stage from the repository root so the `app` package imports resolve.
 > See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for the full write-up of the
 > "Storage folder is already accessed" error.
 
-### 1. Ingest
+### 1. Ingest and index
 
 ```bash
-python -m app.ingestion.crawl            # sitemap + BFS crawl  → data/raw/
-python -m app.ingestion.clean            # HTML → sections      → data/cleaned/
-python -m app.ingestion.chunk            # sections → chunks    → data/chunks/
-python -m app.ingestion.build_doc_graph  # link graph           → data/graph/
+python -m app.ingestion.folder --root data/docs
 ```
 
-### 2. Embed and index
+Every supported file is converted to canonical Markdown first (MarkItDown for
+`.docx` / `.pptx` / `.html` / `.txt`, pymupdf4llm for `.pdf`, read as-is for
+`.md`), then parsed into ordered blocks and chunked. The sync is incremental:
+metadata diffs and content hashes limit re-chunking/re-embedding to files that
+really changed. Embeddings are cached by exact chunk text.
+
+Use `--reset` to rebuild the collection from scratch and `--prune-cache` to drop
+embedding-cache entries no longer referenced by the index.
+
+Visual assets are extracted automatically for each changed PDF/DOCX/PPTX and
+stored under `data/index/assets/<file_id>/`. To run only that stage:
 
 ```bash
-python -m app.retrieval.embed_chunks
+python -m app.ingestion.assets --root data/docs
 ```
 
-This embeds `data/chunks/corpus.jsonl` incrementally (identical chunk text is
-reused from the previous run) and then upserts the vectors into the local Qdrant
-collection, recreating it. Batches are checkpointed to a `.partial` file, so a
-crash never loses completed work. The Gemini path additionally paces requests to
-respect the free-tier per-minute quota.
-
-### 3. Ask questions
+### 2. Ask questions
 
 ```bash
 python -m app.reasoning.rag_graph        # interactive Rich CLI
@@ -260,7 +268,7 @@ Thinking mode uses the larger `answer_thinking` / `no_context_thinking` token
 budgets (see `app/core/config/generation.py`), because hidden reasoning tokens
 count against the completion.
 
-### 4. Benchmark retrieval
+### 3. Benchmark retrieval
 
 ```bash
 python -m app.evaluation.run_eval --retriever all --k 1 3 5 10
@@ -280,7 +288,7 @@ Useful flags:
 Gold labels are defined by *(url, section_heading)* and re-pointed at the current
 corpus on every run, so chunker changes do not silently invalidate the benchmark.
 
-### 5. Evaluate answer quality
+### 4. Evaluate answer quality
 
 ```bash
 python -m app.evaluation.answer_eval              # generate answers + judge (cached)
@@ -355,9 +363,8 @@ and scores it with an LLM judge on three axes:
 
 ## Notes
 
-- The crawler is scoped to LangChain docs (`docs.langchain.com` and
-  `reference.langchain.com`, LangGraph Python paths). Change `CRAWL_ROOTS`,
-  `ALLOWED_DOMAINS`, and `ALLOWED_PATH_PREFIXES` to target another site.
+- Ingestion is scoped to one local folder. Standalone spreadsheets `.xlsx` /
+  `.csv` / `.tsv`, images and source-code files are skipped by the scanner.
 - `external_search_node` always uses Gemini with Google Search grounding, since
   OpenRouter does not expose that tool — hence `DEFAULT_MODEL` stays Gemini-only.
 - Files in `data/` and `output/` are derived artifacts and safe to regenerate by
@@ -416,4 +423,4 @@ services, and governance.
 - [ ] **Agentic retrieval** — retrieval as a tool, grade → rewrite → re-retrieve loop
 - [ ] **CI quality gate** — pytest + eval thresholds to block regressions
 - [ ] **Production hardening** — Redis cache, rate limiting, guardrails / prompt-injection defence
-- [ ] **Multi-source ingestion** — web crawl + local folders (code, markdown, PDF)
+- [ ] **Web-source ingestion** — crawl/import web pages on top of the local-folder pipeline

@@ -10,15 +10,17 @@ venv/
 
 # Derived artifacts (regenerate by re-running the pipeline)
 output/
-data/raw/
-data/cleaned/
-data/chunks/
-data/embeddings/
-data/graph/
-data/samples/
-data/index/
+data/*
+!data/app_state.json
 
 # Tooling / agent config (not part of the project)
 .agents/
+.opencode/
+.specify/
 opencode.json
 .idea/
+
+# Temp / scratch files
+temp/
+tmp/
+*.tmp

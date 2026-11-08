@@ -28,6 +28,7 @@ from app.core.config import (
 )
 from app.ingestion.chunking import build_chunks_for_file
 from app.ingestion.identity import file_id_for, point_id_for
+from app.ingestion.raw_assets import remove_raw_assets
 from app.retrieval.embeddings import embed_texts, load_cached_embeddings, record_model
 from app.retrieval.store import get_client
 
@@ -139,6 +140,10 @@ def _chunk_payload(chunk: dict) -> dict:
         "text": chunk["text"],
         "caption": chunk.get("caption"),
         "table_number": chunk.get("table_number"),
+        "asset_id": chunk.get("asset_id"),
+        "asset_path": chunk.get("asset_path"),
+        "headers": chunk.get("headers"),
+        "row_count": chunk.get("row_count"),
     }
 
 
@@ -208,6 +213,7 @@ def remove_paths(rel_paths: Iterable[str]) -> int:
     _ensure_collection(client)
     for rel_path in paths:
         _delete_file_points(client, file_id_for(rel_path))
+        remove_raw_assets(rel_path)
     return len(paths)
 
 

@@ -83,6 +83,7 @@ class TokenSettings(ConfigGroup):
     grade: int = 256
     rewrite: int = 128
     route: int = 600
+    table_tool: int = 200
     document_card: int = 700
     insight_single: int = 900
     insight_map: int = 400

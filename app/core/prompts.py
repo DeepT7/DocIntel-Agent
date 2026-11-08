@@ -53,6 +53,49 @@ def build_answer_prompt(query: str, context: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Table tool: fetch full raw tables before answering
+# --------------------------------------------------------------------------- #
+TABLE_TOOL_PROMPT = """You decide whether the answer needs full raw table rows.
+
+The context below may contain table stubs (columns and row entities only) or
+tables truncated for length. You may request the complete raw table by id.
+
+Available tables (id | table number | caption | columns | rows | file):
+__TABLES__
+
+Current context:
+__CONTEXT__
+
+User question:
+__QUERY__
+
+Rules:
+- Request a table ONLY when its exact rows/cells are needed to answer and the
+  context does not already contain them.
+- Prefer the smallest set of tables that can answer the question.
+- Use only ids listed above. Never invent an id.
+- Return at most __MAX_TABLES__ ids.
+
+Return ONLY JSON, no prose:
+{"table_ids": ["<id>", ...]}
+Use {"table_ids": []} when no fetch is needed.
+
+JSON:"""
+
+
+def build_table_tool_prompt(
+    query: str, context: str, tables: str, max_tables: int
+) -> str:
+    return _fill(
+        TABLE_TOOL_PROMPT,
+        query=query,
+        context=context or "(none)",
+        tables=tables or "(none)",
+        max_tables=str(max_tables),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Intent routing (chat vs document question)
 # --------------------------------------------------------------------------- #
 # A language-agnostic router: the model classifies intent, so we never enumerate

@@ -30,6 +30,7 @@ settings = Settings()
 # Paths & data
 DOCS_DIR = settings.paths.docs_dir
 INDEX_DIR = settings.paths.index_dir
+ASSETS_DIR = INDEX_DIR / "assets"
 STATE_PATH = settings.paths.state_path
 
 # Ingestion & chunking
@@ -40,6 +41,19 @@ INDEX_VERSION = settings.ingestion.index_version
 UPSERT_BATCH_SIZE = settings.ingestion.upsert_batch_size
 CACHE_PRUNE_RATIO = settings.ingestion.cache_prune_ratio
 CACHE_PRUNE_MIN_EXTRA = settings.ingestion.cache_prune_min_extra
+ASSET_MIN_BYTES = settings.ingestion.asset_min_bytes
+ASSET_MIN_WIDTH = settings.ingestion.asset_min_width
+ASSET_MIN_HEIGHT = settings.ingestion.asset_min_height
+ASSET_MIN_AREA = settings.ingestion.asset_min_area
+ASSET_MAX_ASPECT_RATIO = settings.ingestion.asset_max_aspect_ratio
+ASSET_MIN_INK_RATIO = settings.ingestion.asset_min_ink_ratio
+ASSET_PDF_DPI = settings.ingestion.asset_pdf_dpi
+ASSET_PDF_MIN_DISPLAY = settings.ingestion.asset_pdf_min_display
+ASSET_PDF_MIN_DISPLAY_AREA = settings.ingestion.asset_pdf_min_display_area
+ASSET_OFFICE_MIN_DISPLAY = settings.ingestion.asset_office_min_display
+ASSET_OFFICE_MIN_DISPLAY_AREA = settings.ingestion.asset_office_min_display_area
+ASSET_REPEAT_COUNT = settings.ingestion.asset_repeat_count
+ASSET_REPEAT_MAX_AREA = settings.ingestion.asset_repeat_max_area
 BREADCRUMB_MAX_DEPTH = settings.ingestion.breadcrumb_max_depth
 OUTLINE_VERSION = settings.ingestion.outline_version
 WATCH_ENABLED = settings.ingestion.watch_enabled
@@ -79,6 +93,7 @@ FETCH_MULTIPLIER = settings.retrieval.fetch_multiplier
 FETCH_MIN_EXTRA = settings.retrieval.fetch_min_extra
 REFERENCE_PENALTY = settings.retrieval.reference_penalty
 SECTION_CHUNKS_LIMIT = settings.retrieval.section_chunks_limit
+TABLE_LOOKUP_LIMIT = settings.retrieval.table_lookup_limit
 REFERENCE_MIN_TEXT = settings.retrieval.reference_min_text
 REFERENCE_DENSITY_WINDOW = settings.retrieval.reference_density_window
 REFERENCE_DENSITY_THRESHOLD = settings.retrieval.reference_density_threshold
@@ -112,6 +127,10 @@ ROUTE_MAX_QUERIES = settings.graph.route_max_queries
 SECTION_IDS_MAX = settings.graph.section_ids_max
 SECTION_QUERY_MIN_TITLE_CHARS = settings.graph.section_query_min_title_chars
 SECTION_QUERY_MIN_TITLE_WORDS = settings.graph.section_query_min_title_words
+TABLE_MAX_ROWS = settings.graph.table_max_rows
+TABLE_MAX_CHARS = settings.graph.table_max_chars
+TABLE_TOOL_MAX_TABLES = settings.graph.table_tool_max_tables
+TABLE_TOOL_CONTEXT_CHARS = settings.graph.table_tool_context_chars
 
 # Capabilities
 CARD_SINGLE_PASS_CHARS = settings.cards.single_pass_chars

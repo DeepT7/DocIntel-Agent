@@ -5,9 +5,9 @@ data** — the transformations, decisions, and artifacts at every step. It is a
 description of the pipeline, not a usage guide (setup and commands live in
 `README.md`).
 
-- Ingestion / indexing: `app/ingestion/folder.py`, `app/ingestion/extract.py`
+- Ingestion / indexing: `app/ingestion/folder.py`, `app/ingestion/extract.py`, `app/ingestion/assets.py`, `app/ingestion/chunking.py`, `app/ingestion/raw_assets.py`
 - Retrieval: `app/retrieval/retrieve.py`, `app/retrieval/embeddings.py`, `app/retrieval/store.py`
-- Reasoning: `app/reasoning/rag_graph.py`, `app/reasoning/answer.py`, `app/core/prompts.py`
+- Reasoning: `app/reasoning/rag_graph.py`, `app/reasoning/answer.py`, `app/reasoning/table_tools.py`, `app/reasoning/image_tools.py`, `app/core/prompts.py`
 - Evaluation: `app/evaluation/run_eval.py`, `app/evaluation/answer_eval.py`
 
 ---
@@ -18,29 +18,37 @@ description of the pipeline, not a usage guide (setup and commands live in
 flowchart TD
     subgraph OFFLINE["OFFLINE — build the index"]
         S1["1 · Discover files<br/>+ detect changes"]
-        S2["2 · Extract<br/>files -> ordered blocks"]
-        S3["3 · Resolve table captions<br/>promote / drop picture regions"]
-        S4["4 · Chunk<br/>blocks -> chunks"]
-        S5["5 · Embed<br/>chunks -> dense vectors (cached)"]
+        S2["2 · Convert<br/>files -> canonical Markdown -> blocks"]
+        S2B["2.1 · Smart assets<br/>extract -> filter visual junk"]
+        S3["3 · Annotate blocks<br/>merge page-break tables + captions"]
+        S4["4 · Chunk<br/>text chunks + table/image stubs"]
+        S4B["4.1 · Raw asset store<br/>tables/*.json, images/*"]
+        S5["5 · Embed<br/>stub/text -> dense vectors (cached)"]
         S6["6 · Index<br/>upsert dense + sparse into Qdrant"]
 
         S1 --> S2 --> S3 --> S4 --> S5 --> S6
         S2 -. "blocks" .-> S3
+        S2 -. "PDF picture boxes / Office media / local refs" .-> S2B
+        S2B -. "filtered images + manifest" .-> S4B
+        S2B -. "image manifest" .-> S4
+        S4 -. "raw tables" .-> S4B
         S4 -. "chunks" .-> S5
         S5 -. "vectors" .-> S6
+        S6 -. "points (stubs + pointers)" .-> S4B
     end
 
     subgraph ONLINE["ONLINE — answer a question"]
-        Q1["7 · Retrieve<br/>hybrid dense + BM25 (RRF)"]
+        Q1["7 · Retrieve<br/>hybrid dense + BM25 (RRF)<br/>+ table_number filter"]
         Q2{"8 · Grade<br/>confident enough?"}
         Q3["8a · Rewrite query"]
         Q4["8b · External search<br/>Gemini + Google grounding"]
-        Q5["9 · Answer<br/>/ answer_with_fallback / fallback"]
+        Q5["9 · Answer<br/>hydrate table stubs -> prompt"]
 
         Q1 --> Q2
         Q2 -- yes --> Q5
         Q2 -- "no, rewrites < 1" --> Q3 --> Q1
         Q2 -- "no, rewrites >= 1" --> Q4 --> Q5
+        Q5 -. "read_raw_table(asset_id)" .-> S4B
     end
 
     S6 -. "docs_local collection" .-> Q1
@@ -49,9 +57,16 @@ flowchart TD
 Data moves through the stages as a chain of representations:
 
 ```
-files ─► blocks ─► annotated blocks ─► chunks ─► (text, dense vector, sparse vector) ─► Qdrant points
-question ─► standalone query ─► ranked chunks ─► (relevant chunks ± web context) ─► answer
+files ─► canonical Markdown ─► blocks ─► annotated blocks ─► chunks (text + table_stub + image_stub) ─► Qdrant points
+      └─► smart assets ─► filtered images + manifest ─► data/index/assets/images/<file_id>/
+                          raw tables (from chunks) ─► data/index/assets/tables/<file_id>.json
+question ─► standalone query ─► ranked chunks ─► hydrate table_stubs from raw JSON ─► prompt ─► answer
 ```
+
+**Core idea — raw on disk, stub/pointer in the index.** Table bodies and image
+pixels are **not** embedded. A compact `table_stub` / `image_stub` is embedded for
+retrieval; the full content stays on disk and is reached by a deterministic
+`asset_id` (and `asset_path`) at query time.
 
 ---
 
@@ -66,8 +81,8 @@ question ─► standalone query ─► ranked chunks ─► (relevant chunks ±
    hidden segment (`.something`) is skipped. Only **metadata** is collected
    (`rel_path`, `name`, `size`, `mtime_ns`) — file contents are not opened.
    ```python
-   SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".py", ".json",
-                           ".docx", ".pdf", ".html", ".htm"}
+   SUPPORTED_EXTENSIONS = {".md", ".markdown", ".txt", ".docx", ".pptx",
+                           ".pdf", ".html", ".htm"}
    ```
 2. Metadata is compared against the SQLite **file-state cache**
    (`data/index/metadata.sqlite3`, table `file_state`), which stores `size`,
@@ -95,14 +110,15 @@ the changed paths into the debounced background worker (see `INDEXING.md`).
 
 ---
 
-## 2. Extract files into ordered blocks
+## 2. Convert every document to canonical Markdown
 
-**Component:** `extract_blocks()` in `app/ingestion/extract.py`.
+**Component:** `canonical_markdown()` + `extract_blocks()` in `app/ingestion/extract.py`.
 
 **Processing**
 
-Instead of flattening a file to one string, each file is converted into a list of
-**ordered blocks**, so structure (headings, paragraph breaks, table position) survives.
+Every supported file is first converted to **one canonical Markdown string**, then a
+single Markdown parser turns that string into **ordered blocks**, so structure
+(headings, paragraph breaks, table position) survives:
 
 | Block | Shape |
 | --- | --- |
@@ -111,50 +127,117 @@ Instead of flattening a file to one string, each file is converted into a list o
 | `table` | `{"type": "table", "rows": [[str, ...], ...]}` |
 | `picture` | `{"type": "picture", "text": str}` |
 
-Each format has its own extractor:
-
-| Format | Extractor | How it processes |
+| Format | Canonical source | How it processes |
 | --- | --- | --- |
-| `.md` / `.markdown` | `_blocks_from_markdown` | Streaming parse: plain lines buffer into a paragraph; a blank line, `#` heading, or `|` table row flushes it. Headings become `heading` blocks (level = count of leading `#`); pipe tables are parsed by `_parse_markdown_table`, which drops the `| --- |` alignment row via `_is_separator`. |
-| `.docx` | `_blocks_docx` | `document.iter_inner_content()` preserves true order; paragraphs with Word heading/title styles become `heading` blocks, other paragraphs become `text`, and `Table` objects become `table` blocks (cell text stripped, all-empty rows dropped). |
-| `.pdf` | `_blocks_pdf` | `pymupdf4llm.to_markdown()` renders the PDF to Markdown (inferring headings and tables), then the Markdown parser runs over it. Text inside picture regions is emitted as `picture` blocks. |
-| `.html` / `.htm` | `_blocks_html` | BeautifulSoup strips `script/style/noscript/nav/footer/header/aside`; then `h*`, `p`, `li`, and `table` elements become heading/text/table blocks. |
-| everything else | `_blocks_text` | The whole file (`.txt`, code, JSON, ...) becomes a single `text` block. |
+| `.md` / `.markdown` | file text | Already canonical; read as-is. |
+| `.html` / `.htm` | **MarkItDown** | BeautifulSoup first removes page boilerplate (`script`, `style`, `noscript`, `nav`, `footer`, `header`, `aside`), then MarkItDown converts the cleaned HTML to Markdown. |
+| `.docx` / `.pptx` / `.txt` | **MarkItDown** | MarkItDown converts the document to Markdown (headings, lists, tables and slide titles are preserved). |
+| `.pdf` | **pymupdf4llm** (PyMuPDF) | `pymupdf4llm.to_markdown()` renders the PDF to Markdown (inferring headings and tables). Text inside picture regions is emitted as `picture` blocks. |
+| anything else | — | Rejected. The scanner never enqueues unsupported formats (standalone spreadsheets, images and source code are skipped). |
+
+**Normalisation** (`_normalize_markdown`)
+
+- Fenced code and PyMuPDF4LLM's `<!-- Start/End of picture text -->` markers are
+  protected first. HTML comments outside code are then removed; comments inside
+  code samples survive. The picture markers are kept because they identify
+  picture regions.
+- Image references (`![alt](path)`) are removed from the body text; local image
+  files are still captured separately as visual assets (§2.1). `<br>` becomes a space
+  and `&nbsp;`/non-breaking spaces become normal spaces.
+- Line endings, trailing whitespace and runs of 3+ blank lines are normalised.
+
+**Markdown parsing** (`_blocks_from_markdown`)
+
+- `#` lines become `heading` blocks (level = number of leading `#`).
+- Pipe tables become `table` blocks; the `| --- |` alignment row is dropped.
+- Fenced code blocks are kept as `text` (a `#` inside code is never a heading).
+- Other text accumulates into paragraph blocks; picture markers become `picture`
+  blocks.
 
 **Output:** an ordered `list[dict]` of blocks per file.
 
 ---
 
-## 3. Resolve table captions & filter figures
+## 2.1 Extract & filter visual assets (smart asset extraction)
 
-**Component:** `_attach_table_captions()` in `app/ingestion/folder.py`.
+**Component:** `extract_assets()` in `app/ingestion/assets.py`.
 
 **Processing**
 
-1. For each `table` or `picture` block, `_adjacent_caption()` looks at the neighbouring
-   text blocks (the one **below first**, then the one above) and matches authored
-   captions with two regexes:
+Every indexed file also passes through a visual-asset pass. Extraction differs by
+container, but filtering is shared:
+
+| Source | Candidate extraction |
+| --- | --- |
+| `.pdf` | `pymupdf4llm` layout marks picture regions (`class = "picture"`); `pymupdf` renders each region to PNG at `ASSET_PDF_DPI`. This captures vector charts and scanned pages, not just embedded raster xrefs. The nearest caption box is attached when present. |
+| `.docx` | `zipfile` reads image parts referenced by `word/document.xml` (plus footnotes/endnotes). Header/footer logos and unused media are never candidates. DrawingML `wp:extent` gives the displayed size in inches. |
+| `.pptx` | `zipfile` reads image parts referenced by `ppt/slides/slideN.xml`. Slide masters/layouts and template logos are excluded. DrawingML `a:ext` gives the displayed size in inches. |
+| `.md` / `.markdown` / `.html` / `.htm` | `_markup_candidates()` resolves local image references (`![alt](src)` / `<img src>`) that point to a real file next to the document; remote and data-URI sources are ignored. |
+| `.txt` | No embedded image assets; the pass is a no-op. |
+
+**Filtering** — a candidate is rejected when any check fails:
+
+- `tiny_file` — smaller than `ASSET_MIN_BYTES`.
+- `too_small` / `too_small_area` — pixel dimensions or area below the minimum.
+- `thin` — aspect ratio above `ASSET_MAX_ASPECT_RATIO` (rules, dividers, banners).
+- `blank` — ink ratio below `ASSET_MIN_INK_RATIO` (uniform/blank blocks).
+- `small_on_page` — displayed too small: PDF bbox in points, or Office DrawingML
+  extent in inches. This is what removes most logos and icons.
+- `repeated` — the same small image appears `ASSET_REPEAT_COUNT` or more times
+  (template logo/watermark).
+- `unsupported_format` — image format PyMuPDF cannot decode (e.g. EMF/WMF/SVG).
+
+**Output:** `data/index/assets/images/<file_id>/` containing the kept images plus
+`manifest.json` (asset paths, page/slide, pixel/display size, bbox, caption,
+sha256, entropy and rejection counts). Each kept image is later turned into an
+`image_stub` chunk (see §4). `remove_raw_assets()` deletes both this directory and
+the file's table manifest when the document is deleted.
+
+**Standalone CLI:** `python -m app.ingestion.assets --root data/docs`.
+
+---
+
+## 3. Annotate blocks (page-break merge + captions)
+
+**Components:** `_merge_page_break_tables()` then `_attach_table_captions()` in
+`app/ingestion/chunking.py` (`build_chunks_for_file` runs
+`_attach_table_captions(_merge_page_break_tables(extract_blocks(path)))`).
+
+**Processing**
+
+1. **Page-break table merge** (`_merge_page_break_tables`): a table split across
+   pages is a `table` followed by another `table` — possibly with a short page
+   marker (`"2"`, `"Page 3"`, `"continued"`) between them. They are merged when
+   the second table has **no author caption** and the **same column count** as
+   the first. If the second table repeats the header row, that row is dropped.
+2. **Caption resolution** (`_attach_table_captions`): for each `table` or
+   `picture` block, `_adjacent_caption()` looks at the neighbouring text blocks
+   (the one **below first**, then the one above) and matches authored captions
+   with two regexes:
    ```
    TABLE_RE  = ^\s*\**\s*(table|bảng)\s*([A-Za-z]?\.?\d+(?:\.\d+)*[a-z]?)\s*[:.\-]
    FIGURE_RE = ^\s*\**\s*(figure|hình)\s*([A-Za-z]?\.?\d+(?:\.\d+)*[a-z]?)\s*[:.\-]
    ```
    A trailing `:` `.` or `-` is required, so a reference like "Table 3 shows" does not
    match; dotted numbers (2.1, A.1, 3.2a) are kept whole.
-2. Decisions:
+3. Decisions:
    - A **table** with a "Table N:" caption is annotated with `caption` + `table_number`.
    - A **picture** region is kept **only if** its caption says "Table N" (the region is
      actually a boxed table); it is promoted to a `table` block using its text as
-     content. Figure/chart regions are **dropped** (their text is meaningless without
-     the image).
+     content (`rows=[]`, `content=<text>`). Figure/chart text regions are **dropped** —
+     real figures are captured separately as image assets (§2.1) and indexed as
+     `image_stub` chunks (§4).
    - The caption block is marked consumed so it is not duplicated in the body.
 
-**Output:** a new block list where tables carry captions and figure text is removed.
+**Output:** a new block list where page-split tables are merged and tables carry
+captions.
 
 ---
 
-## 4. Chunk blocks
+## 4. Chunk blocks (text + table/image stubs)
 
-**Component:** `build_chunks_for_file()` in `app/ingestion/folder.py`.
+**Component:** `build_chunks_for_file()` in `app/ingestion/chunking.py`; raw table
+storage in `app/ingestion/raw_assets.py`.
 
 **Processing**
 
@@ -165,7 +248,50 @@ The chunker walks the annotated blocks and tracks the **current heading** (initi
 | --- | --- |
 | `heading` | Flush the body buffered under the previous heading (`emit_body()`), then push a node on the heading stack. The node gets a **materialized path id** (`s4`, `s4.1`, …; structural fallbacks `x1`/`s4.x1`), a clean title, a parsed section number and a depth. A heading is **never emitted as a chunk by itself** — it becomes the `section_id`/`section_ancestors` (and a clean text prefix) of the chunks that follow. |
 | `text` / `picture` | Appended to a running `body` buffer. |
-| `table` | Flush the body, then emit **one atomic chunk** that is never split. Caption (author caption, else `table_caption(rows)`) is the primary signal; the nearest heading is fallback context only when no author caption exists. The table shares its section's `section_id`; only `chunk_type=table` and the display-only `section_heading` suffix `(Table)` differ. |
+| `table` | Flush the body, then emit **one atomic `table_stub` chunk** (never split) and append a pointer line to the prose. See below. |
+
+### 4.1 Table stub + raw store
+
+For each table the chunker:
+
+1. Computes a deterministic id `table_id = "{file_id}_{section_id}_t{index}"`.
+2. Extracts `headers = rows[0]` and `row_keys` = first-column labels of the body
+   rows (capped at `MAX_ROW_KEYS = 40`).
+3. Emits a compact **`table_stub`** chunk whose text is:
+   ```
+   [TABLE STUB | ID: <table_id>]
+   Caption: <author caption, else table_caption(rows)>
+   Columns: <comma list of headers>
+   Row Entities: <comma list of row_keys>
+   Total Rows: <N>
+   ```
+   The **data rows themselves are not embedded** — only this semantic summary.
+4. Appends a reference line `[Ref Table: <table_id> - <caption>]` to the running
+   body, so prose and table stay linked.
+5. Appends the **full raw table** (`headers`, `rows`, `content`, `caption`,
+   `table_number`, `section_id`, `breadcrumb`, counts) to the file's table
+   manifest, written to `data/index/assets/tables/<file_id>.json`.
+
+A picture region promoted to a table (`rows=[]`, `content=<text>`) keeps its
+extracted text in the stub (there are no columns/rows to summarize) and stores
+`content` in the manifest; `read_raw_table` returns no rows for it and callers
+fall back to the stub text.
+
+### 4.2 Image stub + pointer
+
+After the block walk, the kept images from `extract_assets()` become **`image_stub`**
+chunks (no VLM call at ingest):
+
+1. Deterministic id `image_id = "{file_id}_s0_p{index}"` (bound to the `Overview`
+   section, since the asset manifest carries no section mapping).
+2. Stub text:
+   ```
+   [IMAGE STUB | ID: <image_id> | Path: <asset_path>]
+   Caption: <caption, when present>
+   ```
+3. A reference line `[Ref Image: <image_id> - <caption>]` is appended to the body.
+
+### 4.3 Text splitting
 
 `emit_body()` joins the buffered text and splits it with
 `_split_text(text, CHUNK_TARGET_CHARS=1200, CHUNK_MAX_CHARS=1800)`:
@@ -184,22 +310,25 @@ chunk_id = f"{file_id}:{seq}"                                   # seq is per-fil
 Fields: `chunk_id, file_id, path, url, title, file_name, section_heading, section_level,
 section_depth, breadcrumbs, breadcrumb_levels, section_id, section_ancestors,
 section_titles, section_depths, section_numbers, section_title_clean, section_number,
-raw_heading, chunk_type, context_header, doc_type, char_count, text` (plus `caption`,
-`table_number` for tables).
+raw_heading, chunk_type, context_header, doc_type, char_count, text`. Stub chunks add
+`asset_id`, `asset_path`, `caption`, `headers`, `row_count` (and `table_number` for
+tables).
 
 **Resulting rules**
 
-- A table is always exactly one chunk; a text run is ≥1 chunk depending on length.
+- A table is always exactly one `table_stub` chunk; a text run is ≥1 chunk depending on length.
 - A heading with no body produces no chunk of its own, but its node still appears in the
   canonical tree when any descendant chunk carries it in `section_ancestors`.
 - `section_id` keeps the printed section path when consistent (`s4`, `s4.1`) and
   falls back to a structural id (`x1`, `s4.x1`) for unnumbered/wrapped headings; duplicate
   printed paths get a `-2` suffix, so every id is unique.
-- A table shares its section's `section_id`; asking for that section returns prose **and**
-  table chunks.
+- A table stub shares its section's `section_id`; asking for that section returns prose **and**
+  table stubs.
 - The contextual header uses clean titles (no `**`, no synthetic `(Table)` suffix).
 
-**Output:** `list[dict]` of chunk records for the changed files.
+**Output:** `list[dict]` of chunk records for the changed files, plus
+`data/index/assets/tables/<file_id>.json` (raw tables) and the image files/manifest
+written in §2.1.
 
 ---
 
@@ -253,18 +382,27 @@ and position come from the chunk record / Qdrant payload, not from the cache.
                  section_numbers, section_title_clean, section_number,
                  raw_heading, chunk_type, section_heading, section_level,
                  section_depth, breadcrumbs, breadcrumb_levels, context_header,
-                 doc_type, char_count, text, caption, table_number },
+                 doc_type, char_count, text, caption, table_number,
+                 asset_id, asset_path, headers, row_count },     # stub -> raw pointer
    )
    ```
    - The **sparse BM25 vector** is encoded client-side by Qdrant's FastEmbed; the
      collection applies **IDF** when scoring.
    - `point_id = uuid5(NAMESPACE_URL, chunk_id)` is deterministic, so re-runs overwrite
      the same point instead of duplicating.
+   - `table_stub` / `image_stub` payloads carry `asset_id` (deterministic id),
+     `asset_path` (`tables/<file_id>.json` or `images/<file_id>/<name>.png`),
+     `caption`, `headers`, `row_count` — the pointer the online path uses to
+     resolve the raw content.
 3. Points are upserted in batches. Before re-chunking, all points of a changed/deleted
    file were already deleted by `file_id`, so nothing goes stale.
-4. The file-state cache (`metadata.sqlite3`) is rewritten with the new hashes and
+4. **Lifecycle / cleanup:** deleting a file (or re-indexing it) also calls
+   `remove_raw_assets(rel_path)`, which removes both
+   `data/index/assets/tables/<file_id>.json` and
+   `data/index/assets/images/<file_id>/` — no orphaned assets remain.
+5. The file-state cache (`metadata.sqlite3`) is rewritten with the new hashes and
    `INDEX_VERSION`.
-5. **Cache maintenance:** if the cache has grown past
+6. **Cache maintenance:** if the cache has grown past
    `live_points * 1.5 + 200`, `prune_cache()` scrolls the collection, collects the
    live `text` values, and drops cache lines no longer referenced.
 
@@ -296,11 +434,16 @@ metadata cache and embedding cache.
 - Each hit is normalised into a result dict: `score` (fused), `semantic_score`,
   `keyword_score`, `chunk_id`, `file_id`, `url`, `title`, `section_id`,
   `section_ancestors`, `section_titles`, `section_title_clean`, `chunk_type`,
-  `section_heading`, `text`, `caption`, `table_number`.
+  `section_heading`, `text`, `caption`, `table_number`, plus the stub pointers
+  `asset_id`, `asset_path`, `headers`, `row_count`.
 - `section_chunks(scope, path, section_ids, include_descendants=...)` is the structural
   reader: it filters `section_id` (exact leaf, used by small-to-big) or
   `section_ancestors` (parent → whole subtree) with `MatchAny(any=[…])`. Raw heading
   text is never used as a filter.
+- `table_chunks(scope, table_numbers, paths=...)` is a **payload filter**, not a text
+  search: it returns `table_stub` chunks whose `table_number` matches an explicit
+  reference (case variants included, so "table a.1" matches "A.1"). This guarantees
+  "Table N" reaches the answer even when its stub ranks poorly for the wording.
 
 **Output:** a ranked list of chunks.
 
@@ -325,14 +468,37 @@ flowchart LR
 | Stage | Processing |
 | --- | --- |
 | `condense` | If there is `chat_history`, rewrite the follow-up into a standalone query; otherwise pass it through unchanged (no LLM call). |
-| `retrieve` | `vector_search` (hybrid RRF) at `DEFAULT_TOP_K = 5`. |
+| `retrieve` | `vector_search` (hybrid RRF) at `DEFAULT_TOP_K = 5`. Explicit "Table N"/"Bảng N" references are detected first and their stubs locked in via `table_chunks` (payload filter). |
 | `grade` | If the top `semantic_score >= 0.5`, accept all chunks and **skip the LLM**. Otherwise ask the utility model which chunk indices are relevant and keep only those. Sets `graded_ok`. |
 | route | `graded_ok` → answer; else if `rewrite_count < 1` → rewrite; else → external search. |
 | `rewrite` | One query rewrite, then loop back to `retrieve`. Increments `rewrite_count`. |
-| `answer` | Generate from the relevant internal chunks only. |
+| `answer` | Section-expand, **hydrate table/image stubs**, run the bounded `read_raw_table` tool pass, then generate. |
 | `external_search` | Gemini + Google Search grounding; collects grounded text and source URLs. |
 | `answer_with_fallback` | Generate from internal + external context combined. |
 | `fallback` | Decline cleanly when nothing is usable. |
+
+**Table/image hydration (answer building)** — `_sources_for_answer()` in
+`rag_graph.py` runs, in order:
+
+1. `_expand_to_sections()` — small-to-big: pull the full section a chunk belongs to.
+2. `hydrate_table_stubs()` (`table_tools.py`) — for each `table_stub`, call
+   `read_raw_table(asset_id)`, render the raw rows as Markdown, and **append** it to
+   the chunk text. Empty-row (picture-derived) tables and missing files fall back to
+   the stub text. Large tables are truncated to `TABLE_MAX_ROWS` (40) / `TABLE_MAX_CHARS`
+   (6000) with a pointer to the id.
+3. `hydrate_image_stubs()` (`image_tools.py`) — annotate each `image_stub` with its
+   stored file path and metadata (size, page, caption); pixels are not inlined.
+4. `_fetch_requested_tables()` — a **bounded tool pass**: only when the turn involves
+   tables, a utility model is shown the Document Card table manifest
+   (`available_tables`) and the current context, and may request up to
+   `TABLE_TOOL_MAX_TABLES` (3) ids it still needs. Each is fetched with
+   `read_raw_table_tool` (id validated against `_TABLE_ID_RE`) and appended as a fresh
+   `table_stub` chunk. This covers unretrieved tables and rows truncated inline.
+
+`read_raw_table` is exposed as the tool schema `READ_RAW_TABLE_TOOL` (`table_id: str`)
+and mirrored by the manifest prompt; `view_image` (`image_id`/`image_path`) closes the
+same loop for images. The simple `answer_question()` path in `answer.py` also runs both
+hydration steps, so non-graph callers see raw rows too.
 
 Supporting processing:
 
@@ -385,14 +551,15 @@ Two independent evaluation stages measure different layers.
 | Stage | Reads | Writes / produces |
 | --- | --- | --- |
 | 1 Discover | `data/docs/**`, `data/index/metadata.sqlite3` | `changed` / `deleted` sets |
-| 2 Extract | file bytes | ordered blocks |
-| 3 Captions | blocks | annotated blocks (captions, figure filtering) |
-| 4 Chunk | annotated blocks | chunk records |
-| 5 Embed | chunk text, `embeddings_cache.jsonl` | dense vectors, updated cache |
-| 6 Index | vectors + chunk records | `output/qdrant_db/` (`docs_local`), `metadata.sqlite3` |
+| 2 Extract | file bytes | canonical Markdown -> ordered blocks |
+| 2.1 Assets | file bytes (PDF picture boxes, Office media, local image refs) | filtered images + `data/index/assets/images/<file_id>/manifest.json` |
+| 3 Annotate | blocks | merged tables + annotated blocks (captions, picture promotion) |
+| 4 Chunk | annotated blocks, image manifest | chunk records; raw tables -> `data/index/assets/tables/<file_id>.json` |
+| 5 Embed | chunk text (stub text included), `embeddings_cache.jsonl` | dense vectors, updated cache |
+| 6 Index | vectors + chunk records | `output/qdrant_db/` (`docs_local`), `metadata.sqlite3`; deletes stale raw assets |
 | Cache prune | Qdrant payloads, cache | trimmed cache |
-| 7 Retrieve | query, `docs_local` | ranked chunks |
-| 8 Reason | ranked chunks, chat history, web | answer + sources |
+| 7 Retrieve | query, `docs_local`, Document Cards | ranked chunks (incl. raw-table JSON via `read_raw_table`) |
+| 8 Reason | ranked chunks, raw tables/images, chat history, web | answer + sources |
 | 9 Eval | questions, retrievers, `run_rag` | `output/eval_report.json`, `output/answer_eval/*.json` |
 
 ---
@@ -403,18 +570,35 @@ Two independent evaluation stages measure different layers.
   deleting the old points and adding new ones.
 - **Chunk text contains `title` + `heading`.** Renaming a file or changing a heading
   changes the chunk text, which invalidates the cache entries for that file.
-- **A table is atomic and caption-first.** Tables are never split; the authored caption
-  is preferred over the surrounding heading as retrieval context.
-- **Picture regions are dropped unless a "Table N" caption promotes them.**
+- **Raw on disk, stub/pointer in the index.** Table rows and image pixels are never
+  embedded. A `table_stub`/`image_stub` carries only a semantic summary plus an
+  `asset_id`/`asset_path` pointer; the full data lives in `data/index/assets/` and is
+  fetched by id at query time.
+- **Table/image ids are deterministic.** `table_id = "<file_id>_<section_id>_t<i>"`,
+  `image_id = "<file_id>_s0_p<i>"`; re-indexing the same file yields the same ids, so
+  pointers and manifests stay consistent.
+- **A table is one atomic `table_stub`.** Tables are never split; page-split tables are
+  merged at ingestion, and the authored "Table N" caption is the primary retrieval
+  signal (the stub embeds columns + row entities, not the data rows).
+- **Pictures are only promoted when captioned "Table N".** Figure/chart picture text is
+  dropped from the body; real figures are indexed separately as image stubs.
+- **Only informative images are stored as assets.** Tiny, thin, blank, repeated or
+  unsupported images never reach `data/index/assets/`; asset extraction failure
+  must never block text indexing.
 - **The embedding cache is not a chunk store.** It holds no metadata; chunk type is read
-  from the Qdrant payload (`chunk_type == "table"`, plus `caption` / `table_number`).
+  from the Qdrant payload (`table_stub`/`image_stub`, plus `asset_id`, `caption`,
+  `table_number`).
+- **Retrieval uses payload metadata, not text matching, for references.** "Table N" uses
+  a `table_number` filter (`table_chunks`); hydration uses `asset_id`, never a path
+  guess.
 - **Sections are identified by materialized paths, not heading text.** `section_id`
   (`s4.1`; `x`/`-2` fallbacks for unnumbered or duplicate paths) and
   `section_ancestors` are generated at ingestion; `MatchAny` on `section_ancestors`
   returns a parent's whole subtree. `section_heading` is display / evaluation metadata
   only and must never be used as a retrieval filter.
-- **The Document Card is the outline source of truth.** `outline_tree` is refreshed by
-  `POST /api/sync`; chat reads it from the RAM-cached registry and does not scroll Qdrant
-  to build an outline.
+- **The Document Card is the outline source of truth.** `outline_tree`, `tables` and
+  `images` are refreshed by `POST /api/sync`; chat reads them from the RAM-cached
+  registry and does not scroll Qdrant to build an outline or table manifest.
 - **`INDEX_VERSION` is the re-index switch.** Bump it whenever extraction/chunking
-  changes, to force a full re-index without a manual reset.
+  changes, to force a full re-index without a manual reset. (Currently `"15"`;
+  `outline_version` `3`.)

@@ -1,4 +1,9 @@
-from typing import TypedDict, NotRequired
+from typing import TypedDict
+
+try:  # Python 3.11+
+    from typing import NotRequired
+except ImportError:  # pragma: no cover - Python 3.10 compatibility
+    from typing_extensions import NotRequired
 
 
 class RetrievedChunk(TypedDict):
@@ -20,6 +25,15 @@ class RetrievedChunk(TypedDict):
     raw_heading: str
     char_count: int
     text: str
+    # Raw-asset pointers (table_stub / image_stub chunks).
+    caption: NotRequired[str | None]
+    table_number: NotRequired[str | None]
+    asset_id: NotRequired[str | None]
+    asset_path: NotRequired[str | None]
+    headers: NotRequired[list[str] | None]
+    row_count: NotRequired[int | None]
+    table_hydrated: NotRequired[bool]
+    table_rows: NotRequired[int | None]
 
 
 class ExternalSource(TypedDict):

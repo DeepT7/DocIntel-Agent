@@ -21,6 +21,15 @@ from app.reasoning.answer import (
     resolve_section,
     rewrite_query,
 )
+from app.reasoning.image_tools import hydrate_image_stubs
+from app.reasoning.table_tools import (
+    available_tables,
+    extract_table_references,
+    hydrate_table_stubs,
+    read_raw_table_tool,
+    request_table_ids,
+    table_chunk_from_raw,
+)
 from app.core.config import (
     DEFAULT_MODEL,
     DEFAULT_TOP_K,
@@ -33,9 +42,11 @@ from app.core.config import (
     SECTION_EXPAND_MAX_CHUNKS,
     SECTION_EXPAND_PER_SECTION,
     SECTION_PER_DOC_FLOOR,
+    TABLE_TOOL_CONTEXT_CHARS,
+    TABLE_TOOL_MAX_TABLES,
 )
 from app.core.sections import flatten_sections
-from app.retrieval.retrieve import document_outline, section_chunks, vector_search
+from app.retrieval.retrieve import document_outline, section_chunks, table_chunks, vector_search
 from app.core.tracing import observe, update_current_span, set_trace_io, trace_context, flush_traces
 from app.core.text import clean_text
 
@@ -170,6 +181,21 @@ def retrieve_node(state: RAGState) -> dict:
     results: list[dict] = []
     focus_paths = doc_paths[:MAX_SECTION_DOCS] if doc_paths else []
     router_queries = state.get("queries") or []
+
+    # Explicit "Table N" references are a metadata lookup, so they are fetched
+    # first and locked: the requested table is guaranteed to reach the answer
+    # even when its stub does not rank well for the surrounding wording.
+    table_refs = extract_table_references(query)
+    if table_refs:
+        for chunk in table_chunks(scope, table_refs, paths=doc_paths):
+            chunk_id = chunk.get("chunk_id")
+            if chunk_id and chunk_id in locked_chunk_ids:
+                continue
+            if chunk_id:
+                locked_chunk_ids.add(chunk_id)
+            results.append(chunk)
+            if len(results) >= MAX_SECTION_CHUNKS:
+                break
     # Best-effort comparison mapping: the router emits one rewritten query per
     # side, in the same order as target_doc_ids. Use it only when the counts line
     # up AND the queries are distinct; some models return the same mixed query
@@ -292,6 +318,7 @@ def retrieve_node(state: RAGState) -> dict:
         doc_paths=doc_paths,
         num_chunks=len(results),
         section_locks=section_locks,
+        table_refs=table_refs,
     )
     return {
         "retrieved_chunks": results,
@@ -411,11 +438,77 @@ def _expand_to_sections(
     return expanded[:max_chunks]
 
 
+def _fetch_requested_tables(
+    query: str,
+    sources: list[dict],
+    state: RAGState,
+) -> list[dict]:
+    """Bounded ``read_raw_table`` tool pass before answer generation.
+
+    Runs only when the turn already involves tables, so ordinary prose questions
+    pay no extra model call. The selector sees the Document Card table manifest
+    and the current (possibly truncated) context.
+    """
+    scope = state.get("scope")
+    if not scope:
+        return sources
+    paths = state.get("doc_paths") or list(
+        dict.fromkeys(source.get("path") for source in sources if source.get("path"))
+    )
+    tables = available_tables(scope, paths or None)
+    if not tables:
+        return sources
+    if not extract_table_references(query) and not any(
+        source.get("chunk_type") == "table_stub" for source in sources
+    ):
+        return sources
+
+    context = format_context(sources)[:TABLE_TOOL_CONTEXT_CHARS]
+    selected = request_table_ids(
+        query, context, tables, max_tables=TABLE_TOOL_MAX_TABLES
+    )
+    if not selected:
+        return sources
+
+    by_id = {table.get("table_id"): table for table in tables}
+    existing = {
+        source.get("asset_id") for source in sources if source.get("asset_id")
+    }
+    extra: list[dict] = []
+    for table_id in selected:
+        if table_id in existing:
+            continue
+        raw = read_raw_table_tool(table_id)
+        if not raw:
+            continue
+        meta = by_id.get(table_id) or {}
+        extra.append(
+            table_chunk_from_raw(
+                raw,
+                table_number=meta.get("table_number")
+                or raw.get("table_number")
+                or "",
+            )
+        )
+        existing.add(table_id)
+
+    return [*sources, *extra] if extra else sources
+
+
+def _sources_for_answer(state: RAGState) -> list[dict]:
+    """Relevant chunks -> section-expanded -> table-hydrated -> tool-expanded."""
+    query = state.get("standalone_query") or state["query"]
+    chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
+    sources = _expand_to_sections(chunks, state.get("scope"))
+    sources = hydrate_table_stubs(sources)
+    sources = hydrate_image_stubs(sources)
+    return _fetch_requested_tables(query, sources, state)
+
+
 @observe("answer_node", capture_output=False)
 def answer_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    retrieved_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
-    sources = _expand_to_sections(retrieved_chunks, state.get("scope"))
+    sources = _sources_for_answer(state)
     context = format_context(sources)
     answer = generate_answer(query, context, thinking=state.get("thinking", False))
     update_current_span(output=answer, num_sources=len(sources), answer_chars=len(answer))
@@ -530,8 +623,7 @@ def external_search_node(state: RAGState) -> dict:
 @observe("answer_with_fallback_node", capture_output=False)
 def answer_with_fallback_node(state: RAGState) -> dict:
     query = state.get("standalone_query") or state["query"]
-    internal_chunks = state.get("relevant_chunks") or state.get("retrieved_chunks", [])
-    internal_chunks = _expand_to_sections(internal_chunks, state.get("scope"))
+    internal_chunks = _sources_for_answer(state)
     internal_context = format_context(internal_chunks) if internal_chunks else ""
     external_context = state.get("external_context", "").strip()
 

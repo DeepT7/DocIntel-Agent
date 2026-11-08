@@ -291,7 +291,14 @@ def answer_question(query: str, top_k: int = DEFAULT_TOP_K) -> AnswerResult:
             "sources": [],
         }
 
-    # Format the context from the search results 
+    # Resolve table_stub hits to their raw rows before prompting, so the model
+    # sees cell values rather than only the compact stub. Imported here to avoid
+    # a cycle (table_tools imports _generate from this module).
+    from app.reasoning.image_tools import hydrate_image_stubs
+    from app.reasoning.table_tools import hydrate_table_stubs
+
+    results = hydrate_table_stubs(results)
+    results = hydrate_image_stubs(results)
     context = format_context(results)
     answer = generate_answer(query, context)
 

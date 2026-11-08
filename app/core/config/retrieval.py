@@ -16,6 +16,8 @@ class RetrievalSettings(ConfigGroup):
     reference_penalty: float = 0.4
     # Default chunk limit for whole-section reads.
     section_chunks_limit: int = 20
+    # Max table_stub chunks fetched by an explicit "Table N" reference.
+    table_lookup_limit: int = 8
 
     # Citation-density heuristic for detecting bibliography-like sections.
     reference_min_text: int = 200

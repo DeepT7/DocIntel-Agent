@@ -116,6 +116,30 @@ def _structural_fields(
 ) -> dict:
     """Deterministic fields that always follow the chunks (no LLM call)."""
     tree = build_section_tree(chunks)
+    tables: list[dict] = []
+    images: list[dict] = []
+    for chunk in chunks:
+        ctype = chunk.get("chunk_type")
+        if ctype == "table_stub":
+            tables.append(
+                {
+                    "table_id": chunk.get("asset_id"),
+                    "section_id": chunk.get("section_id"),
+                    "caption": chunk.get("caption") or "",
+                    "table_number": chunk.get("table_number") or "",
+                    "headers": chunk.get("headers") or [],
+                    "row_count": chunk.get("row_count", 0),
+                }
+            )
+        elif ctype == "image_stub":
+            images.append(
+                {
+                    "image_id": chunk.get("asset_id"),
+                    "section_id": chunk.get("section_id"),
+                    "caption": chunk.get("caption") or "",
+                    "image_path": chunk.get("asset_path"),
+                }
+            )
     record = dict(existing or {})
     record.update(
         {
@@ -123,6 +147,8 @@ def _structural_fields(
             "file_name": Path(rel_path).name,
             "outline_tree": tree,
             "sections": render_outline(tree),
+            "tables": tables,
+            "images": images,
             "outline_version": OUTLINE_VERSION,
             "outline_hash": current_hash,
             "outline_updated_at": datetime.now(timezone.utc).isoformat(),

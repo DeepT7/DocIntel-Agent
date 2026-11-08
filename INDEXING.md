@@ -68,6 +68,7 @@ design's boundaries.
 | `app/indexing/content.py` | `read_content()`, `ContentError` | **Mechanism 4.** Reads one file on demand, confined to the scope (blocks `../`), decodes UTF-8 text or returns base64, caps the read at `CONTENT_MAX_BYTES`. |
 | `app/indexing/manager.py` | `IndexManager`, `get_manager()` | Process-wide facade: start/stop watcher, status, tree, raw read. |
 | `app/ingestion/folder.py` | `index_paths()`, `remove_paths()`, `sync_folder()` | Existing chunker/embedder, refactored so one file can be indexed without scanning the folder. `sync_folder()` now uses the metadata cache for change detection. |
+| `app/ingestion/assets.py` | `extract_assets()`, `sync_assets()`, `remove_assets()` | Smart visual-asset stage: extracts PDF picture regions / Office media, filters icons, logos, rules, blank and repeated template images, writes `data/index/assets/<file_id>/` + `manifest.json`. Best-effort: failures never block text indexing. |
 
 ```python
 class IndexManager:
@@ -173,7 +174,8 @@ curl "http://127.0.0.1:8756/api/index/status"
 4. `apply_changes()` hashes the file; if the hash is unchanged it just refreshes
    `mtime_ns`/`size`.
 5. Otherwise `index_paths()` deletes the old points for `file_id`, chunks, embeds
-   cache-aware, upserts, then `sync_outlines()` refreshes the document card.
+   cache-aware, upserts, refreshes filtered visual assets, then `sync_outlines()`
+   refreshes the document card.
 6. Cache row → `indexed` with the new hash; failures → `error` (retried on the
    next event).
 

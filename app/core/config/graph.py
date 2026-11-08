@@ -31,3 +31,11 @@ class GraphSettings(ConfigGroup):
     # Section-query heuristic: minimum title specificity before matching.
     section_query_min_title_chars: int = 12
     section_query_min_title_words: int = 2
+
+    # Table hydration: inline rows injected into the answer context per table.
+    table_max_rows: int = 40
+    table_max_chars: int = 6000
+
+    # Table tool: on-demand raw-table fetch before answer generation.
+    table_tool_max_tables: int = 3
+    table_tool_context_chars: int = 6000
