@@ -1,4 +1,4 @@
-"""Capability: the Document Registry — a reusable "card" per file (Cấp độ 2).
+"""Capability: the Document Registry — a reusable "card" per file (Level 2).
 
 Chunks are small and often never name their own document ("Open port 8502"), so a
 question like "what does the Docker setup guide say about the port?" cannot be

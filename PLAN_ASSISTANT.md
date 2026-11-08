@@ -6,8 +6,7 @@
 
 Hệ thống local-first trên **thư mục tài liệu của người dùng**:
 
-- **Main (đầy đủ)**: hỏi–đáp, tìm, tóm tắt/insight, hệ thống hóa; về sau flashcard/slide.
-- **Quick (ambient)**: popup qua hotkey — hỏi nhanh, tìm, **gợi ý viết** từ đoạn đang viết (clipboard) + kho tài liệu.
+- **Main (đầy đủ)**: hỏi–đáp, tóm tắt/insight, hệ thống hóa; về sau flashcard/slide.
 
 Mọi bề mặt **chia sẻ một lõi**: cùng scope (folder), index Qdrant, lịch sử. User trỏ folder; file đổi được **sync incremental** khi cần.
 
@@ -28,7 +27,6 @@ Mọi bề mặt **chia sẻ một lõi**: cùng scope (folder), index Qdrant, l
 | **Async-first**: job nền + status | `app/jobs.py`; `POST` trả `job_id`, `GET` poll | ✅ |
 | **Transformation-as-data** (task = prompt config) | dự kiến `capabilities/tasks.py` | ⏳ |
 | **Provider abstraction** (Esperanto) | dự kiến `app/core/llm.py` | ⏳ |
-| **Insight embed để search được** | dự kiến `doc_type=insight` vào Qdrant | ⏳ |
 | **MCP** (agent dùng hệ thống) | dự kiến, xa | ⏳ |
 
 **Không copy**: SurrealDB/Next.js/Docker (giữ Python/Qdrant); "add source thủ công" (giữ folder sync incremental); web-only (giữ đường ambient).
@@ -41,16 +39,14 @@ Một process Python
  │   ├─ ingestion/   extract · folder(sync, chunk, root payload)
  │   ├─ retrieval/   retrieve(hybrid + scope) · embeddings · store
  │   ├─ reasoning/   answer(_generate) · rag_graph
- │   ├─ capabilities/  search · sources · sync · suggest · ask · insights
+ │   ├─ capabilities/  sources · sync · ask · insights
  │   ├─ jobs.py      job nền + status
  │   ├─ app_state.py scope, recent, conversations[conv_id]
  │   └─ core/        config · prompts · scope · models
  ├─ app/server/main.py   FastAPI (API-first) ──► UI web (browser) = MAIN
- └─ desktop/             Quick popup native (pywebview) — TUỲ CHỌN (ambient)
 ```
 
 - **Main** = trang web từ FastAPI (`http://localhost:8756`). Không Qt.
-- **Quick** = popup native riêng (pywebview + hotkey + clipboard), gọi cùng API/bridge.
 - Có thể thay Main bằng **frontend TypeScript (Vite)** gọi cùng HTTP API.
 
 ## 5. Mô hình khái niệm
@@ -62,7 +58,6 @@ Một process Python
 | **Chunk** | đơn vị retrieval | `dense` + `bm25`, có `table_number`/`caption` |
 | **Insight** | tóm tắt cache của 1 file | map-reduce, invalidate theo hash |
 | **Answer** | câu trả lời hỏi–đáp trên folder | qua `rag_graph` có `scope`, đa lượt |
-| **Suggestion** | gợi ý viết (query + clipboard) | có trích dẫn nguồn |
 | **Job** | tác vụ nền | `queued\|running\|done\|error`, có `result` |
 
 ## 6. Cấu trúc file (hiện có)
@@ -70,14 +65,12 @@ Một process Python
 ```
 app/core/scope.py            normalize_root
 app/core/sections.py         canonical section tree: section_id/ancestors + render
-app/core/prompts.py          answer/condense/grade/rewrite/judge + suggest + insight
+app/core/prompts.py          answer/condense/grade/rewrite/judge + insight
 app/ingestion/folder.py      sync_folder, chunk, materialized section paths (INDEX_VERSION=12)
 app/retrieval/retrieve.py    vector_search(scope, paths) · section_chunks(section_id/ancestors)
 app/retrieval/store.py       Qdrant client dùng chung (1 owner)
-app/capabilities/search.py   search(scope, query, paths)
 app/capabilities/sources.py  list_sources(scope)
 app/capabilities/sync.py     sync(scope)
-app/capabilities/suggest.py  suggest(scope, query, clipboard)
 app/capabilities/ask.py      ask(scope, query, history, allow_external, doc_paths)
 app/capabilities/workspace.py list_files(scope)
 app/capabilities/insights.py summarize_source / get_insight / list_insights
@@ -85,8 +78,6 @@ app/reasoning/rag_graph.py   run_rag(query, history, scope, doc_paths, allow_ext
 app/jobs.py                  submit / get / list_jobs
 app/app_state.py             scope, recent, conversations[conv_id]{messages, active_docs, primary_docs, last_used_docs}
 app/server/main.py           FastAPI + trang Main HTML
-desktop/api.py, app.py       bridge + 2 cửa sổ (tuỳ chọn)
-desktop/ui/*.html            Quick/Main native (tuỳ chọn)
 ```
 
 ## 7. Hợp đồng HTTP API
@@ -97,7 +88,7 @@ desktop/ui/*.html            Quick/Main native (tuỳ chọn)
 | GET | `/api/health` | — | `{ok}` |
 | GET | `/api/state` | `?conversation_id=` | `{scope, recent, excluded_docs, conversation_id, session, active_docs, primary_docs, last_used_docs}` |
 | POST | `/api/scope` | `{path, conversation_id?}` | state mới (reset chat đang mở + working set mọi chat) |
-| POST | `/api/sync` | `{scope?}` | `{files, changed, chunks_reindexed, embeddings_computed, outlines}` |
+| POST | `/api/sync` | `{scope?}` | `{job_id}` (poll `/api/job/{id}` → stats) |
 | GET | `/api/sources` | `?scope=` | `[{path,title,file_id}]` |
 | GET | `/api/selection` | — | `{excluded_docs}` — file người dùng BỎ TÍCH |
 | POST | `/api/selection` | `{paths}` | đặt loại trừ; trả `{excluded_docs}` |
@@ -106,8 +97,6 @@ desktop/ui/*.html            Quick/Main native (tuỳ chọn)
 | GET | `/api/registry` | `?scope=` | danh sách "thẻ căn cước" (title, summary, keywords, sections) |
 | GET | `/api/card` | `?scope=&path=` | thẻ của một file |
 | POST | `/api/registry` | `{scope?, force?}` | dựng thẻ còn thiếu (job nền) → `{job_id}` |
-| POST | `/api/search` | `{query, scope?, path?, paths?, top_k}` | hits (`score`, `semantic_score`, `path`, `section_heading`) |
-| POST | `/api/suggest` | `{query, clipboard, scope?}` | `{suggestion, sources}` |
 | POST | `/api/ask` | `{query, scope?, conversation_id?, path?, paths?, top_k?, history?, use_session?, use_selection?, notes?, allow_external?, thinking?, save?}` | `{answer, intent, scope_mode, conversation_id, standalone_query, sources, scope, doc_paths, routed_queries}` |
 | GET | `/api/session` | `?conversation_id=` | lịch sử hội thoại `[{role,content}]` |
 | POST | `/api/session/clear` | `{conversation_id?}` | `{session: []}` |
@@ -122,17 +111,6 @@ desktop/ui/*.html            Quick/Main native (tuỳ chọn)
 | GET | `/api/jobs` | — | tất cả job |
 
 ## 8. Luồng chính
-
-**A. Gợi ý viết (Quick / Main)**
-```
-Ctrl+C → POST /api/suggest {query, clipboard} → sync scope (await)
- → vector_search(query+clipboard, scope) → prompt suggest + context → gợi ý [Source N]
-```
-
-**B. Tìm thông tin (Main)**
-```
-POST /api/search → hybrid RRF trong scope → hits → hiển thị + nguồn
-```
 
 **B2. Hỏi đáp trên folder (RAG đa lượt)**
 ```
@@ -153,13 +131,12 @@ POST /api/insight {path} → job_id
 
 ## 9. Lộ trình
 
-- [x] **Phase 0 — lõi**: `root`/`scope`, `vector_search(scope)`, capabilities (`search`,`sources`,`sync`,`suggest`), `app_state`, prompt `suggest`.
-- [x] **Phase 0.5 — API-first + Insight + jobs**: FastAPI, `jobs.py`, `capabilities/insights.py`. Test: `/`, sync incremental, sources, search, suggest, insight job + cache hit lần 2 (0 LLM call), list insights.
-- [x] **Phase 1 — Quick popup native**: `desktop/*` (bridge + hotkey + clipboard), chưa chạy trên WSL (thiếu display).
+- [x] **Phase 0 — lõi**: `root`/`scope`, `vector_search(scope)`, capabilities (`sources`,`sync`), `app_state`.
+- [x] **Phase 0.5 — API-first + Insight + jobs**: FastAPI, `jobs.py`, `capabilities/insights.py`. Test: `/`, sync incremental, sources, insight job + cache hit lần 2 (0 LLM call), list insights.
 - [x] **Phase 2 — Hỏi đáp trên folder**: `capabilities/ask.py`; `run_rag` nhận `scope` + `allow_external`; session đa lượt. Test: hỏi tiếng Việt → có nguồn `memory.md`, follow-up condense đúng, session + clear OK.
 - [ ] **Phase 2b — Main hoàn thiện**: citation click mở file; streaming; hoặc frontend TS (Vite).
 - [ ] **Phase 3 — Tasks (as data + job)**: `synthesize` → `flashcards` → `slides`; mỗi task là job nền.
-- [ ] **Phase 4 — Insight search được + polish**: embed insight (`doc_type=insight`) để `search` trả cả insight; tray; đóng gói.
+- [ ] **Phase 4 — Insight + polish**: embed insight (`doc_type=insight`) nếu cần; đóng gói.
 - [ ] **Phase 5 — Provider abstraction + MCP** (xa).
 
 ## 10. Chạy
@@ -168,11 +145,7 @@ POST /api/insight {path} → job_id
 # Main (browser, không Qt)
 pip install fastapi uvicorn
 uvicorn app.server.main:app --port 8756     # KHÔNG --reload với Qdrant embedded
-# mở http://localhost:8756  (Q&A, search, suggest, insight)
-
-# Quick popup native (tuỳ chọn, cần màn hình)
-pip install pywebview pynput pyperclip
-python -m desktop.app          # Ctrl+Alt+Space mở Quick
+# mở http://localhost:8756  (Q&A + insight)
 ```
 
 Chỉ mở **một** tiến trình dùng Qdrant tại một thời điểm.
@@ -218,4 +191,3 @@ Chọn theo **nội dung** (file_name + title + summary). `rewritten_queries` (E
 
 - `rag_graph` import **không bắt buộc** `GEMINI_API_KEY` (client lazy); Gemini chỉ cho external search → Q&A nội bộ chạy hoàn toàn bằng OpenRouter.
 - Dev embedded Qdrant: tránh `--reload` (mỗi reload mở lại storage). `sources` rỗng → `POST /api/sync`. Ổn định hơn: bỏ `--reload` hoặc Qdrant server mode.
-- Qt/GTK chỉ cần nếu chạy **Quick native trên Linux**; Main (browser) không cần. Windows/macOS: pywebview dùng WebView2/WKWebView.

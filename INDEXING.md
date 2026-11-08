@@ -139,13 +139,20 @@ source of truth for change detection.
 | Method & path | Purpose |
 |---------------|---------|
 | `GET /api/tree?scope=` | Nested folder/file **metadata** tree (mechanism 1). |
-| `POST /api/sync` | Explicit incremental scan (mechanism 2). Returns `{files, changed, deleted, chunks_reindexed, embeddings_computed, outlines}`. |
+| `POST /api/pick-folder` | Open the OS-native folder dialog (Modern Explorer `IFileOpenDialog` on WSL/Windows) and return the selected path. |
+| `POST /api/sync` | Queue an explicit incremental scan (mechanism 2). Returns `{job_id}`; poll `/api/job/{id}` for `{files, changed, deleted, chunks_reindexed, embeddings_computed, outlines}`. |
 | `GET /api/index/status?scope=` | Watcher mode, queue depth, processed count, cache counters. |
 | `GET /api/file?scope=&path=&max_bytes=` | Raw content of one file, on demand (mechanism 4). Returns `text` (UTF-8) or `content` (base64), plus `size`, `mtime_ns`, `truncated`. |
 
 The watcher starts automatically at server startup for the remembered folder and
 whenever `POST /api/scope` selects a new folder. Setting a new folder stops the
 previous observer.
+
+At startup the saved folder is also re-scanned in the background as a `sync:*`
+job, so edits made while the server was down are indexed and an explicit
+`/api/sync` for the same scope is deduplicated. The UI runs the same incremental
+scan after selecting a folder; the **Update index** button remains as a manual
+fallback.
 
 Examples:
 
@@ -164,7 +171,8 @@ curl "http://127.0.0.1:8756/api/index/status"
 1. FastAPI lifespan reads the saved scope.
 2. `IndexManager.start(scope)` creates the cache DB if needed and starts the
    watcher (`watchdog`, or polling fallback).
-3. No indexing happens until a change is seen or `/api/sync` is called.
+3. A background catch-up `sync_folder()` diffs the folder against the metadata
+   cache, indexing only files changed while the server was down.
 
 **Watcher event** (`on_modified`)
 
@@ -181,9 +189,12 @@ curl "http://127.0.0.1:8756/api/index/status"
 
 **Manual sync**
 
-`/api/sync` → `sync_folder()` → `snapshot()` → `MetadataCache.diff()` →
+`/api/sync` queues a background job (same scope while one is queued/running is
+deduplicated) → `sync_folder()` → `snapshot()` → `MetadataCache.diff()` →
 hash-confirm modified files → `index_paths(changed)` + `remove_paths(deleted)` →
-outlines → file-state cache + `scope_state`.
+outlines → file-state cache + `scope_state`. The UI polls `/api/job/{id}` and
+refreshes Sources when it finishes, so selecting a folder never waits for
+embeddings.
 
 **On-demand read**
 

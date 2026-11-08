@@ -112,7 +112,7 @@ def call_judge(prompt, model=JUDGE_MODEL):
                  "Content-Type": "application/json"},
         json={"model": model,
               "messages": [{"role": "user", "content": prompt}],
-              "response_format": {"type": "json_object"},   # ép JSON hợp lệ
+              "response_format": {"type": "json_object"},   # force valid JSON
               "max_tokens": 2048},
         timeout=120,
     )

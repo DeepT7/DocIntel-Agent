@@ -1,4 +1,4 @@
-"""Shared app state for both windows (Quick and Main).
+"""Shared app state across surfaces.
 
 Two levels, so chats cannot contaminate each other:
 

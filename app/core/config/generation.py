@@ -88,7 +88,6 @@ class TokenSettings(ConfigGroup):
     insight_single: int = 900
     insight_map: int = 400
     insight_reduce: int = 900
-    suggest: int = 800
 
     def as_dict(self) -> dict[str, int]:
         return self.model_dump()

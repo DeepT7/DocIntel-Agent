@@ -138,7 +138,6 @@ CARD_MAX_KEYWORDS = settings.cards.max_keywords
 CACHE_HASH_LEN = settings.cards.cache_hash_len
 INSIGHT_SINGLE_PASS_CHARS = settings.insights.single_pass_chars
 INSIGHT_MAP_GROUP_CHARS = settings.insights.map_group_chars
-SUGGEST_MAX_CLIPBOARD_CHARS = settings.suggest.max_clipboard_chars
 WORKSPACE_MAX_FILES = settings.workspace.max_files
 
 # App state & sessions
@@ -147,11 +146,3 @@ MAX_SESSION_MESSAGES = settings.state.max_session_messages
 MAX_CONVERSATIONS = settings.state.max_conversations
 DEFAULT_CONVERSATION = settings.state.default_conversation
 PRIMARY_DOCS_MAX = settings.state.primary_docs_max
-
-# Desktop app
-DESKTOP_MAX_CLIPBOARD = settings.desktop.max_clipboard
-DESKTOP_HOTKEY = settings.desktop.hotkey
-QUICK_WINDOW_WIDTH = settings.desktop.quick_window_width
-QUICK_WINDOW_HEIGHT = settings.desktop.quick_window_height
-MAIN_WINDOW_WIDTH = settings.desktop.main_window_width
-MAIN_WINDOW_HEIGHT = settings.desktop.main_window_height

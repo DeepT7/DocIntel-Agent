@@ -84,7 +84,7 @@ def _save_cache(cache: dict) -> None:
 # Scoring
 # --------------------------------------------------------------------------- #
 def first_relevant_question(retrieved_ids: list[str], gold_ids: set[str]) -> int | None:
-    """Trả về rank (1-based) của gold đầu tiên; None nếu không có."""
+    """Return the 1-based rank of the first gold chunk; None if absent."""
     for rank, chunk_id in enumerate(retrieved_ids, start=1):
         if chunk_id in gold_ids:
             return rank
@@ -105,7 +105,7 @@ def score_one(retrieved_ids: list[str], gold_ids: set[str]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Retrieval (có cache để không gọi lại API mỗi lần đổi metric)
+# Retrieval (cached so changing metrics does not call the API again)
 # --------------------------------------------------------------------------- #
 def _cache_key(retriever_name: str, top_k: int, question_id: str) -> str:
     return f"{retriever_name}|{top_k}|{question_id}"
@@ -126,7 +126,7 @@ def retrieve_cached(
     cache: dict,
     use_cache: bool,
 ) -> tuple[list[str], bool]:
-    """Trả về (retrieved_ids, was_cached). Retrieves top_k một lần, cache lại."""
+    """Return (retrieved_ids, was_cached). Retrieves top_k once and caches it."""
     key = _cache_key(retriever_name, top_k, question_id)
     if use_cache and key in cache:
         return cache[key], True
@@ -147,7 +147,7 @@ def evaluate_retriever(
     use_cache: bool = True,
     delay: float = 0.0,
 ) -> list[dict]:
-    """Retrieve một lần ở max(ks) rồi cắt dần để tính metric cho từng k."""
+    """Retrieve once at max(ks), then slice down to score each k."""
     max_k = max(ks)
     _update_current_span(retriever=retriever_name, ks=ks, n_questions=len(questions))
     rows = []
@@ -220,13 +220,13 @@ def _print_summary(name: str, k: int, summary: dict) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Evaluate retrievers on the eval question set.")
     parser.add_argument("--retriever", choices=[*RETRIEVERS, "all"], default="all")
-    parser.add_argument("--k", nargs="+", type=int, default=[1, 3, 5, 10], help="Một hoặc nhiều giá trị k")
+    parser.add_argument("--k", nargs="+", type=int, default=[1, 3, 5, 10], help="One or more k values")
     parser.add_argument("--questions", type=str, default="data/eval/questions.json")
-    parser.add_argument("--limit", type=int, default=None, help="Chỉ chạy N câu đầu để thử nhanh")
-    parser.add_argument("--no-cache", action="store_true", help="Bỏ qua cache, gọi lại retrieval")
-    parser.add_argument("--delay", type=float, default=0.0, help="Nghỉ giây giữa các câu (tránh rate limit)")
-    parser.add_argument("--report", type=str, default=None, help="Đường dẫn lưu report JSON")
-    parser.add_argument("--no-resolve-gold", action="store_true", help="Dùng chunk_ids cứng trong questions.json")
+    parser.add_argument("--limit", type=int, default=None, help="Run only the first N questions for a quick check")
+    parser.add_argument("--no-cache", action="store_true", help="Ignore the cache and re-run retrieval")
+    parser.add_argument("--delay", type=float, default=0.0, help="Seconds to sleep between questions (avoid rate limits)")
+    parser.add_argument("--report", type=str, default=None, help="Path to write the JSON report")
+    parser.add_argument("--no-resolve-gold", action="store_true", help="Use hard-coded chunk_ids from questions.json")
     args = parser.parse_args()
 
     ks = sorted(set(args.k))
@@ -243,7 +243,7 @@ def main():
     if args.report:
         report_path = Path(args.report)
     elif args.limit is not None:
-        # Tránh ghi đè báo cáo full khi chỉ chạy thử một phần
+        # Avoid overwriting the full report when running a partial test
         report_path = REPORT_PATH.with_name(f"{REPORT_PATH.stem}_limit{args.limit}{REPORT_PATH.suffix}")
     else:
         report_path = REPORT_PATH

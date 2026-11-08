@@ -1,8 +1,11 @@
 {
-  "scope": "/mnt/c/Users/ADMIN/OneDrive/Documents/books/technical reports",
+  "scope": "/mnt/f/LLM/DocIntel_Agent/data/docs",
   "recent": [
-    "/mnt/c/Users/ADMIN/OneDrive/Documents/books/technical reports",
     "/mnt/f/LLM/DocIntel_Agent/data/docs",
+    "/mnt/f/issue-spotting",
+    "/mnt/f/LLM/learning/papers",
+    "/mnt/f/LLM/DocIntel_Agent/data",
+    "/mnt/c/Users/ADMIN/OneDrive/Documents/books/technical reports",
     "/mnt/f/LLM/DocIntel_Agent"
   ],
   "excluded_docs": [],
@@ -12,7 +15,7 @@
       "active_docs": [],
       "primary_docs": [],
       "last_used_docs": [],
-      "updated_at": 1792323434.3810878
+      "updated_at": 1794106207.4299772
     },
     "99a30fa57bf148489194f9b3e430ef6c": {
       "messages": [],
@@ -38,60 +41,11 @@
       "updated_at": 1793522098.440955
     },
     "803ada71564249d4ab04324d4e6efc56": {
-      "messages": [
-        {
-          "role": "user",
-          "content": "how many files in the folder"
-        },
-        {
-          "role": "assistant",
-          "content": "0 files."
-        },
-        {
-          "role": "user",
-          "content": "what?"
-        },
-        {
-          "role": "assistant",
-          "content": "There are currently no files in the specified folder."
-        },
-        {
-          "role": "user",
-          "content": "are you serious"
-        },
-        {
-          "role": "assistant",
-          "content": "I'm always serious! I have not seen any files in this workspace yet, so 0 is the correct count. Would you like to check another folder or add some documents?"
-        },
-        {
-          "role": "user",
-          "content": "\"Why so serious\" la cau noi cua ai"
-        },
-        {
-          "role": "assistant",
-          "content": "Là câu nói nổi tiếng của Joker (nhân vật trong phim *The Dark Knight*), anh chàng này đấy. Bạn có muốn tìm tài liệu gì trong thư mục không?"
-        },
-        {
-          "role": "user",
-          "content": "hello"
-        },
-        {
-          "role": "assistant",
-          "content": "Hello! Welcome. How can I help you with your documents today?"
-        },
-        {
-          "role": "user",
-          "content": "ai là diễn viên đóng vai joker"
-        },
-        {
-          "role": "assistant",
-          "content": "Diễn viên Heath Ledger đã đóng vai Joker trong bộ phim *The Dark Knight*. Bạn có muốn tôi tìm thêm thông tin hay tài liệu nào liên quan không?"
-        }
-      ],
+      "messages": [],
       "active_docs": [],
       "primary_docs": [],
       "last_used_docs": [],
-      "updated_at": 1793523453.784719
+      "updated_at": 1794111499.3659549
     }
   }
 }

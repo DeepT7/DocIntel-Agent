@@ -392,35 +392,6 @@ def build_judge_prompt(question: str, context: str, answer: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Writing assistance (Quick window)
-# --------------------------------------------------------------------------- #
-SUGGEST_PROMPT = """You help a user who is writing a document and needs ideas or
-missing information. Reply in the same language the user writes in.
-
-The user is writing this excerpt (may be empty):
-__CLIPBOARD__
-
-The user's request:
-__QUERY__
-
-Relevant excerpts from the user's document folder (the ONLY allowed source of facts):
-__CONTEXT__
-
-Instructions:
-- Suggest concrete content to continue or improve the draft, or surface the missing
-  information the user asked for.
-- Stay faithful to the provided excerpts; do NOT invent facts that are not there.
-- Match the tone/register of the documents.
-- Be concise and directly usable.
-- Mark source usage with [Source N] where N matches the numbered context.
-"""
-
-
-def build_suggest_prompt(query: str, clipboard: str, context: str) -> str:
-    return _fill(SUGGEST_PROMPT, query=query, clipboard=clipboard, context=context)
-
-
-# --------------------------------------------------------------------------- #
 # Insights: per-source summary artifacts (map-reduce)
 # --------------------------------------------------------------------------- #
 # An "insight" is a cached, reusable summary of one document. It is produced in
@@ -492,7 +463,7 @@ def build_document_card_prompt(file_name: str, text: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Turn router (self-querying): intent + which documents + sub-queries (Cấp độ 3)
+# Turn router (self-querying): intent + which documents + sub-queries (Level 3)
 # --------------------------------------------------------------------------- #
 # ONE call replaces the old intent router *and* the title-matching ``_detect_docs``:
 # a fast model reads the message + Document Cards and returns the intent and the

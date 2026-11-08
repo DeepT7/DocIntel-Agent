@@ -95,12 +95,11 @@ data/docs (PDF/DOCX/PPTX/HTML/MD/TXT)  →  canonical Markdown  →  blocks  →
 │   ├── reasoning/
 │   │   ├── answer.py          # prompt building, generation, follow-up condensing
 │   │   └── rag_graph.py       # LangGraph pipeline + interactive Rich CLI
-│   ├── capabilities/          # HTTP capabilities: ask/search/outline/sync/registry
+│   ├── capabilities/          # HTTP capabilities: ask/outline/sync/registry
 │   ├── evaluation/
 │   │   ├── run_eval.py        # retrieval benchmark over the gold question set
 │   │   └── answer_eval.py     # answer-level evaluation with an LLM-as-judge
 │   └── server/                # FastAPI API + static browser UI
-├── desktop/                   # optional two-window desktop shell
 ├── data/
 │   ├── docs/                  # source documents (PDF/DOCX/PPTX/HTML/MD/TXT)
 │   ├── eval/questions.json    # hand-curated gold questions
@@ -179,8 +178,7 @@ Key groups (see each file for the full list and defaults):
   (`MAX_TOKENS`), history windows
 - `graph.py`: reasoning-graph caps and gates (`max_section_docs`,
   `max_section_chunks`, `grade_skip_threshold`, `max_rewrites`, ...)
-- `capabilities.py`, `state.py`, `desktop.py`: card/insight/suggest/workspace
-  budgets, session limits, and window sizes
+- `capabilities.py`, `state.py`: card/insight/workspace budgets and session limits
 
 The old flat imports (`from app.core.config import DEFAULT_TOP_K`) still work
 through a compatibility facade in `config/__init__.py`; prefer `settings.*`.

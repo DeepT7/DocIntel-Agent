@@ -754,10 +754,10 @@ def run_cli() -> None:
     console = Console()
     console.print(
         Panel.fit(
-            "[bold]LangGraph RAG[/bold] — hỏi đáp tài liệu LangChain/LangGraph\n"
-            "Hỏi nối tiếp được (giữ ngữ cảnh). Lệnh: "
-            "[cyan]:reset[/cyan] xoá lịch sử · [cyan]:web[/cyan] bật/tắt web · "
-            "[cyan]:think[/cyan] bật/tắt suy luận · [cyan]exit[/cyan]/[cyan]quit[/cyan] thoát.",
+            "[bold]LangGraph RAG[/bold] — Q&A over LangChain/LangGraph documents\n"
+            "Follow-up questions keep context. Commands: "
+            "[cyan]:reset[/cyan] clear history · [cyan]:web[/cyan] toggle web · "
+            "[cyan]:think[/cyan] toggle reasoning · [cyan]exit[/cyan]/[cyan]quit[/cyan] quit.",
             border_style="cyan",
         )
     )
@@ -780,7 +780,7 @@ def run_cli() -> None:
             break
         if lowered in {":reset", "reset", "clear"}:
             history.clear()
-            console.print("[dim]Đã xoá lịch sử hội thoại.[/dim]")
+            console.print("[dim]Conversation history cleared.[/dim]")
             continue
         if lowered in {":web", "web"}:
             allow_external = not allow_external
@@ -794,7 +794,7 @@ def run_cli() -> None:
             continue
 
         started = time.perf_counter()
-        console.print("[dim]Đang truy xuất và sinh câu trả lời...[/dim]")
+        console.print("[dim]Retrieving and generating an answer...[/dim]")
         try:
             result = run_rag(
                 query,
@@ -803,13 +803,13 @@ def run_cli() -> None:
                 thinking=thinking,
             )
         except Exception as error:  # keep the REPL alive on provider failures
-            console.print(f"[bold red]Lỗi:[/bold red] {error}")
+            console.print(f"[bold red]Error:[/bold red] {error}")
             continue
         elapsed = time.perf_counter() - started
 
         standalone = result.get("standalone_query", query)
         if standalone and standalone != query:
-            console.print(f"[dim]↳ Truy vấn độc lập:[/dim] [italic]{standalone}[/italic]")
+            console.print(f"[dim]↳ Standalone query:[/dim] [italic]{standalone}[/italic]")
 
         console.print(Rule("[bold green]Answer[/bold green]", style="green"))
         console.print(Markdown(result.get("answer", "")))
@@ -838,7 +838,7 @@ def run_cli() -> None:
             history.append({"role": "assistant", "content": answer})
 
     flush_traces()
-    console.print("[dim]Đã thoát.[/dim]")
+    console.print("[dim]Bye.[/dim]")
 
 
 if __name__ == "__main__":

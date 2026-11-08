@@ -53,6 +53,7 @@ try { conversationId = localStorage.getItem(CONV_KEY) || ''; } catch { conversat
 // and write these, and every request carries the current value explicitly.
 const PREF_EXTERNAL = 'docintel_external_search';
 const PREF_THINKING = 'docintel_thinking';
+const SOURCES_OPEN_KEY = 'docintel_sources_open';
 
 function readPref(key) {
   try { return localStorage.getItem(key) === '1'; } catch { return false; }
@@ -63,6 +64,7 @@ function writePref(key, on) {
 
 let allowExternal = readPref(PREF_EXTERNAL);
 let thinkingMode = readPref(PREF_THINKING);
+const pollingIndexJobs = new Set();
 
 function storeConversation(id) {
   conversationId = id;
@@ -334,6 +336,14 @@ async function unpin(path) {
 let allSources = [];
 let excludedSet = new Set();
 
+function setSourcesOpen(open) {
+  $('sourcesBody').hidden = !open;
+  $('btnToggleSrc').textContent = open ? '▾' : '▸';
+  $('btnToggleSrc').setAttribute('aria-expanded', String(open));
+  $('btnToggleSrc').title = open ? 'Collapse file list' : 'Expand file list';
+  try { localStorage.setItem(SOURCES_OPEN_KEY, open ? '1' : '0'); } catch { /* private mode */ }
+}
+
 function renderSources() {
   const el = $('sources');
   if (!allSources.length) {
@@ -406,13 +416,12 @@ async function loadState() {
   excludedSet = new Set(s.excluded_docs || []);
 }
 
-async function useFolder(btn) {
-  const path = $('scope').value.trim();
-  if (!path) { status('Enter a folder path', true); return false; }
+async function useFolder(path, btn) {
+  path = (path || '').trim();
+  if (!path) { status('Select a folder', true); return false; }
   return run(btn, 'Folder selected', async () => {
-    let state;
     try {
-      state = await api('/api/scope', {
+      await api('/api/scope', {
         method: 'POST',
         body: { path, conversation_id: conversationId },
       });
@@ -421,9 +430,6 @@ async function useFolder(btn) {
       $('state').textContent = e.message || 'Folder not found';
       throw e;
     }
-    // Show the canonical path the server actually uses (e.g. a Windows path
-    // becomes /mnt/c/... when the server runs in WSL).
-    if (state && state.scope) $('scope').value = state.scope;
     // A new folder starts a fresh context for this conversation.
     $('msglist').innerHTML = '';
     renderWorkingSet([]);
@@ -435,33 +441,54 @@ async function useFolder(btn) {
 }
 
 async function syncIndex(btn) {
-  return run(btn, 'Index updated', async () => {
+  return run(btn, 'Indexing started', async () => {
     const r = await api('/api/sync', { method: 'POST', body: {} });
-    $('out').innerHTML = preHtml(r);
+    if (!r || !r.job_id) { await loadSources(); return; }
+    pollIndexJob(r.job_id);
+  });
+}
+
+async function waitForJob(jobId) {
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const job = await api('/api/job/' + jobId).catch(() => null);
+    if (!job || job.status === 'done' || job.status === 'error') return job;
+  }
+}
+
+// Indexing runs server-side; the UI stays responsive and refreshes Sources when
+// the job finishes instead of waiting for embeddings.
+async function pollIndexJob(jobId) {
+  if (pollingIndexJobs.has(jobId)) return;
+  pollingIndexJobs.add(jobId);
+  $('state').textContent = 'Indexing…';
+  try {
+    const job = await waitForJob(jobId);
+    if (!job || job.status === 'error') {
+      status((job && job.error) || 'Index failed', true);
+      $('state').textContent = '';
+      return;
+    }
+    $('state').textContent = 'Index updated';
     await loadSources();
-  });
+  } finally {
+    pollingIndexJobs.delete(jobId);
+  }
 }
 
-async function search(btn) {
-  return run(btn, 'Search done', async () => {
-    const list = await api('/api/search', { method: 'POST', body: { query: $('q').value, top_k: 5 } });
-    if (!list || !list.length) { $('out').innerHTML = '<div class="muted">No results.</div>'; return; }
-    $('out').innerHTML = list.map((r, i) => {
-      const title = r.title || r.path || 'result';
-      const score = typeof r.score === 'number' ? ' · ' + r.score.toFixed(3) : '';
-      const snippet = (r.text || '').slice(0, 240);
-      return `<div class="card"><div class="t">[${i + 1}] ${escapeHtml(title)}</div>` +
-        `<div class="m">${escapeHtml(r.path || '')}${score}</div>` +
-        `<div class="s">${escapeHtml(snippet)}</div></div>`;
-    }).join('');
-  });
-}
-
-async function suggest(btn) {
-  return run(btn, 'Suggestion ready', async () => {
-    const r = await api('/api/suggest', { method: 'POST', body: { query: $('q').value } });
-    $('out').innerHTML = `<div class="md">${renderMarkdown(r.suggestion || '(no suggestion)')}</div>` +
-      sourcesHtml(r.sources);
+// The server opens the OS folder dialog (the browser cannot expose absolute
+// paths). Picking a folder immediately selects and indexes it.
+async function browseFolder(btn) {
+  return run(btn, '', async () => {
+    $('state').textContent = 'Select a folder in the dialog…';
+    let r;
+    try {
+      r = await api('/api/pick-folder', { method: 'POST', body: {} });
+    } finally {
+      $('state').textContent = '';
+    }
+    if (!r || !r.path) return;
+    if (await useFolder(r.path, null)) await syncIndex($('btnSync'));
   });
 }
 
@@ -497,35 +524,6 @@ async function listInsights(btn) {
   });
 }
 
-// Build the Document Registry: one content-based "card" per file (background job).
-async function buildCards(btn) {
-  return run(btn, 'Building cards…', async () => {
-    const r = await api('/api/registry', { method: 'POST', body: {} });
-    if (!r.job_id) { status('Cards queued'); return; }
-    await new Promise((resolve) => {
-      const timer = setInterval(async () => {
-        try {
-          const job = await api('/api/job/' + r.job_id);
-          if (job.status === 'done' || job.status === 'error') {
-            clearInterval(timer);
-            if (job.status === 'done') {
-              const res = job.result || {};
-              status(`Cards: ${(res.built || []).length} built, ${(res.skipped || []).length} cached`);
-            } else {
-              status(job.error || 'Card build failed', true);
-            }
-            resolve();
-          }
-        } catch (e) {
-          clearInterval(timer);
-          status(e.message, true);
-          resolve();
-        }
-      }, 1200);
-    });
-  });
-}
-
 /* --------------------------------------------------------------- wiring */
 function onEnter(input, handler) {
   input.addEventListener('keydown', (e) => {
@@ -550,10 +548,8 @@ function enableRipple(root) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-  const btnUse = $('btnUse');
   const btnSync = $('btnSync');
   const btnAsk = $('btnAsk');
-  const btnSearch = $('btnSearch');
   const btnInsight = $('btnInsight');
   const aq = $('aq');
 
@@ -590,7 +586,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(btnAsk); }
   });
 
-  btnUse.addEventListener('click', () => useFolder(btnUse));
   btnSync.addEventListener('click', () => syncIndex(btnSync));
   $('btnClear').addEventListener('click', (e) => run(e.currentTarget, 'New chat', async () => {
     const r = await api('/api/conversation/new', { method: 'POST', body: {} });
@@ -600,8 +595,6 @@ document.addEventListener('DOMContentLoaded', () => {
     showEmpty();
     await loadState();
   }));
-  btnSearch.addEventListener('click', () => search(btnSearch));
-  $('btnSuggest').addEventListener('click', (e) => suggest(e.currentTarget));
   btnInsight.addEventListener('click', () => createInsight(btnInsight));
   $('btnList').addEventListener('click', (e) => listInsights(e.currentTarget));
 
@@ -613,11 +606,17 @@ document.addEventListener('DOMContentLoaded', () => {
   $('sources').addEventListener('change', onSourceToggle);
   $('btnAllSrc').addEventListener('click', (e) => run(e.currentTarget, 'All sources on', () => setAllSources(true)));
   $('btnNoneSrc').addEventListener('click', (e) => run(e.currentTarget, 'No sources selected', () => setAllSources(false)));
-  $('btnCards').addEventListener('click', (e) => buildCards(e.currentTarget));
+
+  let sourcesOpen = true;
+  try { sourcesOpen = localStorage.getItem(SOURCES_OPEN_KEY) !== '0'; } catch { /* private mode */ }
+  setSourcesOpen(sourcesOpen);
+  $('sourcesTool').querySelector('.tool-head').addEventListener('click', () => {
+    setSourcesOpen($('sourcesBody').hidden);
+  });
+
+  $('btnBrowse').addEventListener('click', (e) => browseFolder(e.currentTarget));
 
   // Enter works everywhere — no button needed.
-  onEnter($('scope'), async () => { if (await useFolder(btnUse)) await syncIndex(btnSync); });
-  onEnter($('q'), () => search(btnSearch));
   onEnter($('path'), () => createInsight(btnInsight));
 
   enableRipple(document);

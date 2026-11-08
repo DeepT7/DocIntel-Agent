@@ -1,8 +1,8 @@
 """HTTP surface for the whole system (API-first).
 
 Every capability is reachable over HTTP, and the UI is
-only a client. This lets the Main window be an ordinary browser page while the same API can later serve a TypeScript frontend or the
-ambient Quick window.
+only a client. This lets the Main window be an ordinary browser page while the
+same API can later serve a TypeScript frontend.
 
 Run:  uvicorn app.server.main:app --reload --port 8756
 """
@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import app_state, jobs
-from app.core.config import DEFAULT_TOP_K, PRIMARY_DOCS_MAX
+from app.core.config import PRIMARY_DOCS_MAX
 from app.core.scope import validate_folder
 from app.indexing.manager import get_manager
 from app.capabilities.ask import (
@@ -38,10 +38,27 @@ from app.capabilities.router import (
     resolve_scope as cap_resolve_scope,
     route as cap_route,
 )
-from app.capabilities.search import search as cap_search
 from app.capabilities.sources import list_sources as cap_sources
-from app.capabilities.suggest import suggest as cap_suggest
 from app.capabilities.sync import sync as cap_sync
+from app.server.folder_picker import pick_folder as pick_folder_path
+
+
+def _queue_cards(scope: str) -> None:
+    """Build missing/stale document cards in the background (deduplicated)."""
+    name = f"cards:{scope}"
+    for job in jobs.list_jobs():
+        if job["name"] == name and job["status"] in ("queued", "running"):
+            return
+    jobs.submit(name, cap_build_cards, scope, force=False)
+
+
+def _sync_scope(scope: str) -> dict:
+    """Index changed files, keep real-time updates on, and refresh cards."""
+    stats = cap_sync(scope)
+    get_manager().ensure_watcher(scope)
+    _queue_cards(scope)
+    return stats
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -53,6 +70,9 @@ async def lifespan(_app: FastAPI):
             manager.start(scope)
         except Exception as error:  # a bad saved folder must not block the API
             print(f"warning: could not start file watcher: {error}")
+        # Catch up on edits made while the server was down. The watcher starts
+        # first so edits made during the scan are not lost.
+        jobs.submit(f"sync:{scope}", _sync_scope, scope)
     try:
         yield
     finally:
@@ -80,20 +100,6 @@ class ScopeRequest(BaseModel):
 
 
 class SyncRequest(BaseModel):
-    scope: Optional[str] = None
-
-
-class SearchRequest(BaseModel):
-    query: str
-    scope: Optional[str] = None
-    path: Optional[str] = None
-    paths: Optional[list[str]] = None
-    top_k: int = DEFAULT_TOP_K
-
-
-class SuggestRequest(BaseModel):
-    query: str = ""
-    clipboard: str = ""
     scope: Optional[str] = None
 
 
@@ -160,6 +166,15 @@ def health() -> dict:
     return {"ok": True}
 
 
+@app.post("/api/pick-folder")
+def pick_folder() -> dict:
+    """Open the OS-native folder dialog on the machine running the server."""
+    try:
+        return {"path": pick_folder_path()}
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error))
+
+
 @app.get("/api/state")
 def state(conversation_id: str = app_state.DEFAULT_CONVERSATION) -> dict:
     return app_state.snapshot(conversation_id)
@@ -185,16 +200,17 @@ def set_scope(request: ScopeRequest) -> dict:
 
 @app.post("/api/sync")
 def sync(request: SyncRequest) -> dict:
+    """Queue an incremental re-index; poll ``/api/job/{id}`` for the result."""
     scope = _resolve_scope(request.scope)
     if not scope:
         raise HTTPException(status_code=400, detail="no scope selected")
-    try:
-        stats = cap_sync(scope)
-    except (FileNotFoundError, ValueError) as error:
-        raise HTTPException(status_code=400, detail=str(error))
-    # Keep real-time updates on for the folder that was just indexed.
-    get_manager().ensure_watcher(scope)
-    return stats
+
+    name = f"sync:{scope}"
+    for job in jobs.list_jobs():
+        if job["name"] == name and job["status"] in ("queued", "running"):
+            return {"job_id": job["id"], "deduplicated": True}
+
+    return {"job_id": jobs.submit(name, _sync_scope, scope)}
 
 
 @app.get("/api/tree")
@@ -264,23 +280,6 @@ def section(
     return cap_section(scope, path, section_ids)
 
 
-@app.post("/api/search")
-def search(request: SearchRequest) -> list[dict]:
-    scope = _resolve_scope(request.scope)
-    if not scope:
-        raise HTTPException(status_code=400, detail="no scope selected")
-    paths = [p for p in dict.fromkeys([*(request.paths or []), *( [request.path] if request.path else [] )]) if p]
-    return cap_search(scope, request.query, top_k=request.top_k, paths=paths or None)
-
-
-@app.post("/api/suggest")
-def suggest(request: SuggestRequest) -> dict:
-    scope = _resolve_scope(request.scope)
-    if not scope:
-        raise HTTPException(status_code=400, detail="no scope selected")
-    return cap_suggest(scope, request.query, clipboard=request.clipboard)
-
-
 # --------------------------------------------------------------------------- #
 # Q&A over the folder (LangGraph RAG, scoped, multi-turn)
 # --------------------------------------------------------------------------- #
@@ -308,7 +307,7 @@ class TurnPlan:
 def decide_turn(request: AskRequest, scope: str, conv_id: str) -> TurnPlan:
     """Decide the whole turn — history, intent, scope, queries — in ONE function.
 
-    Document scope for this turn. One LLM turn-router (Cấp độ 3) decides both
+    Document scope for this turn. One LLM turn-router (Level 3) decides both
     the intent and which files the message is about, by content (Document
     Cards), not by matching file names. Precedence (highest first):
 
@@ -603,7 +602,7 @@ def insight(scope: Optional[str] = None, path: str = "") -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Document Registry: a content-based "card" per file (Cấp độ 2)
+# Document Registry: a content-based "card" per file (Level 2)
 # --------------------------------------------------------------------------- #
 @app.get("/api/registry")
 def registry(scope: Optional[str] = None) -> list[dict]:

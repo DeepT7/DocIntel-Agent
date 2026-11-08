@@ -141,18 +141,6 @@ button.loading::after {
 .result { margin-top: 10px; font-size: 13px; max-height: 300px; overflow: auto; }
 .result:empty { display: none; }
 
-/* result cards inside the sidebar */
-.card {
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px;
-  margin: 8px 0;
-  background: var(--panel-2);
-}
-.card .t { font-weight: 600; font-size: 13px; }
-.card .m { color: var(--muted); font-size: 11.5px; word-break: break-all; }
-.card .s { margin-top: 6px; font-size: 12.5px; color: #c9cdd6; }
-
 /* --------------------------------------------------------------------- chat */
 .chat { display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
 .chat-head {
@@ -407,3 +395,25 @@ button.loading::after {
   .app { grid-template-columns: 1fr; }
   .sidebar { display: none; }
 }
+
+
+
+/* collapsible section header */
+.tool-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tool-head h2 { margin: 0; }
+.tool-toggle {
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 8px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 7px;
+}
+.tool-toggle:hover { background: #242833; color: var(--text); box-shadow: none; }
+.tool-toggle:active { transform: none; }
+.tool-head { cursor: pointer; user-select: none; }

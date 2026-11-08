@@ -1,4 +1,4 @@
-"""Capability-specific budgets: document cards, insights, suggestions, workspace."""
+"""Capability-specific budgets: document cards, insights, workspace."""
 
 from .base import ConfigGroup
 
@@ -16,10 +16,6 @@ class InsightSettings(ConfigGroup):
     single_pass_chars: int = 14000
     # When map-reducing, chunks are packed into groups of about this size.
     map_group_chars: int = 6000
-
-
-class SuggestSettings(ConfigGroup):
-    max_clipboard_chars: int = 2000
 
 
 class WorkspaceSettings(ConfigGroup):

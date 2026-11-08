@@ -17,10 +17,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from .capabilities import (
     CardSettings,
     InsightSettings,
-    SuggestSettings,
     WorkspaceSettings,
 )
-from .desktop import DesktopSettings
 from .embeddings import EmbeddingSettings
 from .generation import (
     GenerationSettings,
@@ -61,8 +59,6 @@ class Settings(BaseSettings):
 
     cards: CardSettings = Field(default_factory=CardSettings)
     insights: InsightSettings = Field(default_factory=InsightSettings)
-    suggest: SuggestSettings = Field(default_factory=SuggestSettings)
     workspace: WorkspaceSettings = Field(default_factory=WorkspaceSettings)
 
     state: StateSettings = Field(default_factory=StateSettings)
-    desktop: DesktopSettings = Field(default_factory=DesktopSettings)

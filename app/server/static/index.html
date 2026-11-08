@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>DocIntel</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/styles.css?v=5">
-  <script src="/static/app.js?v=5" defer></script>
+  <link rel="stylesheet" href="/static/styles.css?v=17">
+  <script src="/static/app.js?v=17" defer></script>
 </head>
 <body>
   <div class="app">
@@ -15,35 +15,29 @@
       <div class="side-scroll">
         <section class="tool">
           <h2>Folder</h2>
-          <input id="scope" autocomplete="off" spellcheck="false">
           <div class="row">
-            <button id="btnUse">Use folder</button>
+            <button id="btnBrowse" title="Open the system folder dialog">Browse</button>
             <button id="btnSync" class="ghost">Update index</button>
           </div>
           <div id="state" class="muted"></div>
         </section>
 
-        <section class="tool">
-          <h2>Sources</h2>
-          <div class="row">
-            <button id="btnAllSrc" class="ghost">All</button>
-            <button id="btnNoneSrc" class="ghost">None</button>
-            <button id="btnCards" class="ghost">Cards</button>
+        <section class="tool" id="sourcesTool">
+          <div class="tool-head">
+            <h2>Sources</h2>
+            <button id="btnToggleSrc" class="tool-toggle" aria-expanded="true"
+                    aria-controls="sourcesBody" title="Collapse file list">▾</button>
           </div>
-          <div id="srcHint" class="muted"></div>
-          <div id="sources" class="sources-list">
-            <div class="muted">Load a folder to list its files.</div>
+          <div id="sourcesBody">
+            <div class="row">
+              <button id="btnAllSrc" class="ghost">All</button>
+              <button id="btnNoneSrc" class="ghost">None</button>
+            </div>
+            <div id="srcHint" class="muted"></div>
+            <div id="sources" class="sources-list">
+              <div class="muted">Load a folder to list its files.</div>
+            </div>
           </div>
-        </section>
-
-        <section class="tool">
-          <h2>Search</h2>
-          <input id="q" placeholder="keyword or phrase" autocomplete="off">
-          <div class="row">
-            <button id="btnSearch">Search</button>
-            <button id="btnSuggest" class="ghost">Suggest</button>
-          </div>
-          <div id="out" class="result"></div>
         </section>
 
         <section class="tool">
